@@ -9,6 +9,7 @@
 - live smoke로 prepare ready 확인
 - live smoke로 report generate completed 확인
 - live smoke로 start + graph_memory_update_enabled completed 및 graph edge 증가 확인
+- graph-oriented naming cleanup 시작(compat alias 유지)
 
 ## Test Matrix
 

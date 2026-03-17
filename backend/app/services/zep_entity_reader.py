@@ -14,7 +14,7 @@ from ..utils.logger import get_logger
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 from .local_graph_repository import LocalGraphRepository
 
-logger = get_logger('mirofish.zep_entity_reader')
+logger = get_logger('mirofish.graph_entity_reader')
 
 # 제네릭 반환 타입
 T = TypeVar('T')
@@ -69,7 +69,7 @@ class FilteredEntities:
         }
 
 
-class ZepEntityReader:
+class GraphEntityReader:
     """
     Zep 엔터티 조회 및 필터링 서비스.
 
@@ -508,3 +508,7 @@ class ZepEntityReader:
             enrich_with_edges=enrich_with_edges
         )
         return result.entities
+
+
+# Backward-compatible alias during migration
+ZepEntityReader = GraphEntityReader

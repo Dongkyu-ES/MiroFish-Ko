@@ -18,7 +18,7 @@ from ..config import Config
 from ..utils.logger import get_logger
 from .local_graph_repository import LocalGraphRepository
 
-logger = get_logger('mirofish.zep_graph_memory_updater')
+logger = get_logger('mirofish.graph_memory_updater')
 
 
 @dataclass
@@ -199,7 +199,7 @@ class AgentActivity:
         return f"{self.action_type}"
 
 
-class ZepGraphMemoryUpdater:
+class GraphMemoryUpdater:
     """
     시뮬레이션 액션 로그를 읽어 Zep 그래프 메모리를 업데이트한다.
 
@@ -266,7 +266,7 @@ class ZepGraphMemoryUpdater:
         self._failed_count = 0      # 실패
         self._skipped_count = 0     # (DO_NOTHING)
         
-        logger.info(f"ZepGraphMemoryUpdater 완료: graph_id={graph_id}, batch_size={self.BATCH_SIZE}")
+        logger.info(f"GraphMemoryUpdater 완료: graph_id={graph_id}, batch_size={self.BATCH_SIZE}")
     
     def _get_platform_display_name(self, platform: str) -> str:
         """플랫폼"""
@@ -281,10 +281,10 @@ class ZepGraphMemoryUpdater:
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
             daemon=True,
-            name=f"ZepMemoryUpdater-{self.graph_id[:8]}"
+            name=f"GraphMemoryUpdater-{self.graph_id[:8]}"
         )
         self._worker_thread.start()
-        logger.info(f"ZepGraphMemoryUpdater 시작: graph_id={self.graph_id}")
+        logger.info(f"GraphMemoryUpdater 시작: graph_id={self.graph_id}")
     
     def stop(self):
         """중지"""
@@ -296,7 +296,7 @@ class ZepGraphMemoryUpdater:
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=10)
         
-        logger.info(f"ZepGraphMemoryUpdater 중지: graph_id={self.graph_id}, "
+        logger.info(f"GraphMemoryUpdater 중지: graph_id={self.graph_id}, "
                    f"total_activities={self._total_activities}, "
                    f"batches_sent={self._total_sent}, "
                    f"items_sent={self._total_items_sent}, "
@@ -494,18 +494,18 @@ class ZepGraphMemoryUpdater:
         }
 
 
-class ZepGraphMemoryManager:
+class GraphMemoryManager:
     """
     시뮬레이션Zep그래프
     
     시뮬레이션
     """
     
-    _updaters: Dict[str, ZepGraphMemoryUpdater] = {}
+    _updaters: Dict[str, GraphMemoryUpdater] = {}
     _lock = threading.Lock()
     
     @classmethod
-    def create_updater(cls, simulation_id: str, graph_id: str) -> ZepGraphMemoryUpdater:
+    def create_updater(cls, simulation_id: str, graph_id: str) -> GraphMemoryUpdater:
         """
         시뮬레이션그래프
         
@@ -514,14 +514,14 @@ class ZepGraphMemoryManager:
             graph_id: Zep그래프ID
             
         Returns:
-            ZepGraphMemoryUpdater
+            GraphMemoryUpdater
         """
         with cls._lock:
             # , 중지
             if simulation_id in cls._updaters:
                 cls._updaters[simulation_id].stop()
             
-            updater = ZepGraphMemoryUpdater(graph_id)
+            updater = GraphMemoryUpdater(graph_id)
             updater.start()
             cls._updaters[simulation_id] = updater
             
@@ -529,7 +529,7 @@ class ZepGraphMemoryManager:
             return updater
     
     @classmethod
-    def get_updater(cls, simulation_id: str) -> Optional[ZepGraphMemoryUpdater]:
+    def get_updater(cls, simulation_id: str) -> Optional[GraphMemoryUpdater]:
         """시뮬레이션"""
         return cls._updaters.get(simulation_id)
     
@@ -570,3 +570,8 @@ class ZepGraphMemoryManager:
             sim_id: updater.get_stats() 
             for sim_id, updater in cls._updaters.items()
         }
+
+
+# Backward-compatible aliases during migration
+ZepGraphMemoryUpdater = GraphMemoryUpdater
+ZepGraphMemoryManager = GraphMemoryManager

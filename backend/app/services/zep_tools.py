@@ -21,7 +21,7 @@ from ..utils.llm_client import LLMClient
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 from .local_graph_repository import LocalGraphRepository
 
-logger = get_logger('mirofish.zep_tools')
+logger = get_logger('mirofish.graph_tools')
 
 
 @dataclass
@@ -398,7 +398,7 @@ class InterviewResult:
         return "\n".join(text_parts)
 
 
-class ZepToolsService:
+class GraphToolsService:
     """
     Zep도구
     
@@ -443,7 +443,7 @@ class ZepToolsService:
         self._llm_client = llm_client
         self._json_llm_client = json_llm_client
         self._reasoning_llm_client = reasoning_llm_client
-        logger.info("ZepToolsService 완료")
+        logger.info("GraphToolsService 완료")
     
     @property
     def llm(self) -> LLMClient:
@@ -567,7 +567,7 @@ class ZepToolsService:
             )
             
         except Exception as e:
-            logger.warning(f"Zep Search API실패, 검색: {str(e)}")
+            logger.warning(f"그래프 검색 API실패, 로컬 검색으로 폴백: {str(e)}")
             # :핵심검색
             return self._local_search(graph_id, query, limit, scope)
     
@@ -1772,3 +1772,7 @@ class ZepToolsService:
         except Exception as e:
             logger.warning(f"생성인터뷰요약실패: {e}")
             return f"인터뷰 {len(interviews)}건 처리됨. 대상: " + ", ".join([i.agent_name for i in interviews])
+
+
+# Backward-compatible alias during migration
+ZepToolsService = GraphToolsService

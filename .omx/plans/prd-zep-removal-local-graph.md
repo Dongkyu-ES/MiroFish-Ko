@@ -93,7 +93,7 @@
 - live local start smoke: `sim_7a97e33b3088` completed, `total_actions_count=9`, graph edge delta `+5`
 
 ## Remaining Gaps
-- 서비스 클래스 이름/역할은 아직 `Zep*` 명칭을 유지하는 경우가 많다.
+- 서비스 클래스 이름/역할은 일부 alias만 남고, 주 구현 명칭은 backend-agnostic(`Graph*`)로 정리 중이다.
 - `GRAPH_BACKEND=zep` 경로와 공존하는 과도기 상태라 import 수준에서 zep 관련 코드가 남아 있다.
 - local graph 기준 핵심 E2E는 확보했지만, 장시간/대규모 입력에서의 안정성 증거는 아직 부족하다.
 - local graph 검색 품질은 현재 simple lexical/local heuristic 중심이다.
@@ -115,6 +115,6 @@
 7. local start + graph memory smoke
 
 ## Next Execution Slice
-1. 남은 `Zep*` 명명/조건부 import 정리
+1. 남은 `Zep*` alias 제거 여부 결정 및 import 경량화
 2. local graph search 품질 개선(lexical → richer ranking)
 3. parallel/single-platform 스크립트 로깅 공통화
