@@ -4,11 +4,10 @@ OpenAI 호환 형식으로 통일해 호출합니다.
 """
 
 import json
-import re
 from typing import Optional, Dict, Any, List
-from openai import OpenAI
 
 from ..config import Config
+from .codex_broker import CodexBroker
 
 
 class LLMClient:
@@ -18,19 +17,17 @@ class LLMClient:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        codex_broker: Optional[CodexBroker] = None,
     ):
+        self.provider = provider or Config.LLM_PROVIDER
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL_NAME
-        
-        if not self.api_key:
-            raise ValueError("LLM_API_KEY가 설정되지 않았습니다.")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
+        self.codex_broker = codex_broker
+        self.client = None
+        self.codex_broker = self.codex_broker or CodexBroker()
     
     def chat(
         self,
@@ -51,21 +48,18 @@ class LLMClient:
         Returns:
             모델 응답 텍스트
         """
-        kwargs = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        
-        if response_format:
-            kwargs["response_format"] = response_format
-        
-        response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
-        # 일부 모델(예: MiniMax M2.5)은 content에 <think>를 포함하므로 제거
-        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-        return content
+        if response_format and response_format.get("type") == "json_object":
+            json_result = self.codex_broker.chat_json(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return json.dumps(json_result, ensure_ascii=False)
+        return self.codex_broker.chat(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
     
     def chat_json(
         self,
@@ -84,19 +78,8 @@ class LLMClient:
         Returns:
             파싱된 JSON 객체
         """
-        response = self.chat(
+        return self.codex_broker.chat_json(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format={"type": "json_object"}
         )
-        # 마크다운 코드 블록 표기 제거
-        cleaned_response = response.strip()
-        cleaned_response = re.sub(r'^```(?:json)?\s*\n?', '', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'\n?```\s*$', '', cleaned_response)
-        cleaned_response = cleaned_response.strip()
-
-        try:
-            return json.loads(cleaned_response)
-        except json.JSONDecodeError:
-            raise ValueError(f"LLM이 반환한 JSON 형식이 올바르지 않습니다: {cleaned_response}")

@@ -19,10 +19,9 @@ from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
-from openai import OpenAI
-
 from ..config import Config
 from ..utils.logger import get_logger
+from ..utils.llm_client import LLMClient
 from .zep_entity_reader import EntityNode, ZepEntityReader
 
 logger = get_logger('mirofish.simulation_config')
@@ -227,19 +226,27 @@ class SimulationConfigGenerator:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        llm_client: Optional[LLMClient] = None,
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
-        
-        if not self.api_key:
-            raise ValueError("LLM_API_KEY 설정")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
+        self.llm_client = llm_client or LLMClient(
+            api_key=api_key,
+            base_url=base_url,
+            model=model_name,
         )
+    
+    def _get_runtime_llm_model(self) -> str:
+        if getattr(self.llm_client, 'provider', Config.LLM_PROVIDER) == 'codex_cli':
+            return Config.CODEX_JSON_MODEL
+        return self.model_name
+    
+    def _get_runtime_llm_base(self) -> str:
+        if getattr(self.llm_client, 'provider', Config.LLM_PROVIDER) == 'codex_cli':
+            return 'codex_cli'
+        return self.base_url
     
     def generate_config(
         self,
@@ -370,8 +377,8 @@ class SimulationConfigGenerator:
             event_config=event_config,
             twitter_config=twitter_config,
             reddit_config=reddit_config,
-            llm_model=self.model_name,
-            llm_base_url=self.base_url,
+            llm_model=self._get_runtime_llm_model(),
+            llm_base_url=self._get_runtime_llm_base(),
             generation_reasoning=" | ".join(reasoning_parts)
         )
         
@@ -441,8 +448,7 @@ class SimulationConfigGenerator:
         
         for attempt in range(max_attempts):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
+                content = self.llm_client.chat(
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
@@ -451,14 +457,6 @@ class SimulationConfigGenerator:
                     temperature=0.7 - (attempt * 0.1)  # 
                     # max_tokens, LLM
                 )
-                
-                content = response.choices[0].message.content
-                finish_reason = response.choices[0].finish_reason
-                
-                # 
-                if finish_reason == 'length':
-                    logger.warning(f"LLM (attempt {attempt+1})")
-                    content = self._fix_truncated_json(content)
                 
                 # JSON
                 try:

@@ -9,10 +9,6 @@
 flask>=3.0.0
 flask-cors>=6.0.0
 
-# ============= LLM 관련 =============
-# OpenAI SDK (OpenAI 형식으로 LLM 호출 통일)
-openai>=1.0.0
-
 # ============= Zep Cloud =============
 zep-cloud==3.13.0
 

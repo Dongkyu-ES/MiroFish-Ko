@@ -13,9 +13,6 @@ dependencies = [
     "flask>=3.0.0",
     "flask-cors>=6.0.0",
     
-    # LLM 관련
-    "openai>=1.0.0",
-    
     # Zep Cloud
     "zep-cloud==3.13.0",
     

@@ -421,7 +421,13 @@ class ZepToolsService:
     MAX_RETRIES = 3
     RETRY_DELAY = 2.0
     
-    def __init__(self, api_key: Optional[str] = None, llm_client: Optional[LLMClient] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        llm_client: Optional[LLMClient] = None,
+        json_llm_client: Optional[LLMClient] = None,
+        reasoning_llm_client: Optional[LLMClient] = None,
+    ):
         self.api_key = api_key or Config.ZEP_API_KEY
         if not self.api_key:
             raise ValueError("ZEP_API_KEY 설정")
@@ -429,6 +435,8 @@ class ZepToolsService:
         self.client = Zep(api_key=self.api_key)
         # LLMInsightForge생성질문
         self._llm_client = llm_client
+        self._json_llm_client = json_llm_client
+        self._reasoning_llm_client = reasoning_llm_client
         logger.info("ZepToolsService 완료")
     
     @property
@@ -437,6 +445,18 @@ class ZepToolsService:
         if self._llm_client is None:
             self._llm_client = LLMClient()
         return self._llm_client
+    
+    @property
+    def json_llm(self) -> LLMClient:
+        if self._json_llm_client is None:
+            self._json_llm_client = self.llm
+        return self._json_llm_client
+    
+    @property
+    def reasoning_llm(self) -> LLMClient:
+        if self._reasoning_llm_client is None:
+            self._reasoning_llm_client = self.llm
+        return self._reasoning_llm_client
     
     def _call_with_retry(self, func, operation_name: str, max_retries: int = None):
         """API호출"""
@@ -1121,7 +1141,7 @@ class ZepToolsService:
 최대 {max_queries}개의 하위 질문을 생성하세요."""
 
         try:
-            response = self.llm.chat_json(
+            response = self.json_llm.chat_json(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -1578,7 +1598,7 @@ class ZepToolsService:
 최대 {max_agents}명을 선정하고 이유를 설명하세요."""
 
         try:
-            response = self.llm.chat_json(
+            response = self.json_llm.chat_json(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -1636,7 +1656,7 @@ class ZepToolsService:
 질문 3~5개를 생성하세요."""
 
         try:
-            response = self.llm.chat_json(
+            response = self.json_llm.chat_json(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -1686,7 +1706,7 @@ class ZepToolsService:
 위 내용을 바탕으로 종합 요약을 작성하세요."""
 
         try:
-            summary = self.llm.chat(
+            summary = self.reasoning_llm.chat(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}

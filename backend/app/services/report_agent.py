@@ -798,6 +798,8 @@ class ReportAgent:
         simulation_id: str,
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
+        json_llm_client: Optional[LLMClient] = None,
+        reasoning_llm_client: Optional[LLMClient] = None,
         zep_tools: Optional[ZepToolsService] = None
     ):
         """
@@ -814,7 +816,10 @@ class ReportAgent:
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
         
-        self.llm = llm_client or LLMClient()
+        shared_llm = llm_client or LLMClient()
+        self.json_llm = json_llm_client or shared_llm
+        self.reasoning_llm = reasoning_llm_client or shared_llm
+        self.llm = self.reasoning_llm
         self.zep_tools = zep_tools or ZepToolsService()
         
         # 사용 가능한 도구 정의
@@ -1085,7 +1090,7 @@ class ReportAgent:
         )
 
         try:
-            response = self.llm.chat_json(
+            response = self.json_llm.chat_json(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -1212,7 +1217,7 @@ class ReportAgent:
                 )
             
             # 호출LLM
-            response = self.llm.chat(
+            response = self.reasoning_llm.chat(
                 messages=messages,
                 temperature=0.5,
                 max_tokens=4096
@@ -1415,7 +1420,7 @@ class ReportAgent:
         logger.warning(f"섹션 {section.title} , 생성")
         messages.append({"role": "user", "content": REACT_FORCE_FINAL_MSG})
         
-        response = self.llm.chat(
+        response = self.reasoning_llm.chat(
             messages=messages,
             temperature=0.5,
             max_tokens=4096
@@ -1736,7 +1741,7 @@ class ReportAgent:
         max_iterations = 2  # 
         
         for iteration in range(max_iterations):
-            response = self.llm.chat(
+            response = self.reasoning_llm.chat(
                 messages=messages,
                 temperature=0.5
             )
@@ -1776,7 +1781,7 @@ class ReportAgent:
             })
         
         # , 
-        final_response = self.llm.chat(
+        final_response = self.reasoning_llm.chat(
             messages=messages,
             temperature=0.5
         )

@@ -4,6 +4,7 @@
 """
 
 import os
+import shutil
 from dotenv import load_dotenv
 
 # 프로젝트 루트의 `.env` 파일 로드
@@ -27,10 +28,26 @@ class Config:
     # JSON 설정 - ASCII 이스케이프 비활성화(문자가 `\\uXXXX` 대신 그대로 표시)
     JSON_AS_ASCII = False
     
-    # LLM 설정(OpenAI 형식으로 통일)
+    # LLM 설정 (Codex CLI 고정)
+    LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'codex_cli')
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
-    LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
-    LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    LLM_BASE_URL = os.environ.get('LLM_BASE_URL', '')
+    LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-5.4')
+    
+    # Codex CLI 설정
+    CODEX_BIN = os.environ.get('CODEX_BIN', 'codex')
+    CODEX_JSON_MODEL = os.environ.get('CODEX_JSON_MODEL', 'gpt-5.3-codex-spark')
+    CODEX_REASONING_MODEL = os.environ.get('CODEX_REASONING_MODEL', 'gpt-5.4')
+    CODEX_JSON_REASONING_EFFORT = os.environ.get('CODEX_JSON_REASONING_EFFORT', 'high')
+    CODEX_REASONING_EFFORT = os.environ.get('CODEX_REASONING_EFFORT', 'high')
+    CODEX_SERVICE_TIER = os.environ.get('CODEX_SERVICE_TIER', 'fast')
+    CODEX_SANDBOX = os.environ.get('CODEX_SANDBOX', 'read-only')
+    CODEX_TIMEOUT_JSON_SEC = int(os.environ.get('CODEX_TIMEOUT_JSON_SEC', '120'))
+    CODEX_TIMEOUT_REASONING_SEC = int(os.environ.get('CODEX_TIMEOUT_REASONING_SEC', '600'))
+    CODEX_TASKS_DIR = os.environ.get(
+        'CODEX_TASKS_DIR',
+        os.path.join(os.path.dirname(__file__), '../uploads/codex_tasks')
+    )
     
     # Zep 설정
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
@@ -64,11 +81,15 @@ class Config:
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
     
     @classmethod
+    def uses_codex_cli(cls) -> bool:
+        return True
+    
+    @classmethod
     def validate(cls):
         """필수 설정 검증"""
         errors = []
-        if not cls.LLM_API_KEY:
-            errors.append("LLM_API_KEY가 설정되지 않았습니다.")
+        if not shutil.which(cls.CODEX_BIN):
+            errors.append(f"CODEX_BIN 실행 파일을 찾을 수 없습니다: {cls.CODEX_BIN}")
         if not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY가 설정되지 않았습니다.")
         return errors
