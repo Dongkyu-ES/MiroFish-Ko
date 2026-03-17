@@ -82,6 +82,7 @@ report_agent_module = _load_module(
 
 CodexBroker = codex_broker_module.CodexBroker
 LLMClient = llm_client_module.LLMClient
+Config = sys.modules['app.config'].Config
 SimulationConfigGenerator = simulation_config_module.SimulationConfigGenerator
 OasisProfileGenerator = oasis_profile_module.OasisProfileGenerator
 ZepToolsService = zep_tools_module.ZepToolsService
@@ -137,6 +138,22 @@ def test_report_agent_uses_explicit_json_and_reasoning_lanes():
     assert agent.json_llm is json_llm
     assert agent.reasoning_llm is reasoning_llm
     assert agent.llm is reasoning_llm
+
+
+def test_report_agent_local_graph_uses_spark_reasoning_lane_by_default():
+    original_backend = Config.GRAPH_BACKEND
+    try:
+        Config.GRAPH_BACKEND = 'local_sqlite'
+        fake_zep_tools = Mock()
+        agent = ReportAgent(
+            graph_id='g1',
+            simulation_id='s1',
+            simulation_requirement='req',
+            zep_tools=fake_zep_tools,
+        )
+        assert agent.reasoning_llm.codex_broker.reasoning_model == Config.CODEX_JSON_MODEL
+    finally:
+        Config.GRAPH_BACKEND = original_backend
 
 
 def test_zep_tools_uses_explicit_json_and_reasoning_lanes():

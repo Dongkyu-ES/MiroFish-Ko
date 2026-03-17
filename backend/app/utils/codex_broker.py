@@ -8,6 +8,7 @@ Codex CLI 기반 LLM 브로커.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import uuid
 from datetime import datetime
@@ -152,9 +153,17 @@ class CodexBroker:
         )
         
         try:
-            return json.loads(output_file.read_text(encoding='utf-8'))
+            return self._parse_json_output(output_file.read_text(encoding='utf-8'))
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Codex JSON 결과 파싱 실패: {exc}") from exc
+            repaired = self._repair_json_via_codex(
+                raw_output=output_file.read_text(encoding='utf-8'),
+                task_dir=task_dir,
+                timeout_sec=timeout_sec,
+            )
+            try:
+                return self._parse_json_output(repaired)
+            except json.JSONDecodeError as repair_exc:
+                raise ValueError(f"Codex JSON 결과 파싱 실패: {repair_exc}") from exc
     
     def _build_base_command(
         self,
@@ -178,6 +187,36 @@ class CodexBroker:
             command.extend(['--output-schema', str(schema_file)])
         command.append('-')
         return command
+
+    def _parse_json_output(self, raw_text: str) -> Dict[str, Any]:
+        cleaned = raw_text.strip()
+        cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+        return json.loads(cleaned)
+
+    def _repair_json_via_codex(self, raw_output: str, task_dir: Path, timeout_sec: int) -> str:
+        repair_prompt = (
+            "[SYSTEM]\n"
+            "You repair malformed JSON. Return only valid JSON with the same intended structure. "
+            "Do not add markdown fences.\n\n"
+            "[USER]\n"
+            f"The following output is intended to be JSON but is malformed. Repair it:\n{raw_output}"
+        )
+        repair_output = task_dir / 'result_repaired.json'
+        (task_dir / 'repair_prompt.txt').write_text(repair_prompt, encoding='utf-8')
+        command = self._build_base_command(
+            model=self.json_model,
+            reasoning_effort=self.json_reasoning_effort,
+            output_file=repair_output,
+        )
+        self._run_command(
+            command=command,
+            prompt=repair_prompt,
+            task_dir=task_dir,
+            timeout_sec=timeout_sec,
+            output_file=repair_output,
+        )
+        return repair_output.read_text(encoding='utf-8')
     
     def _run_command(
         self,

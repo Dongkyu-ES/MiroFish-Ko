@@ -19,6 +19,7 @@ from datetime import datetime
 from enum import Enum
 
 from ..config import Config
+from ..utils.codex_broker import CodexBroker
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from .zep_tools import (
@@ -792,6 +793,12 @@ class ReportAgent:
     # 채팅 응답당 도구 호출 한도
     MAX_TOOL_CALLS_PER_CHAT = 2
     
+    # local graph compact mode
+    LOCAL_GRAPH_SECTION_LIMIT = 1
+    LOCAL_GRAPH_SECTION_MAX_ITERATIONS = 2
+    LOCAL_GRAPH_SECTION_MAX_TOKENS = 1400
+    LOCAL_GRAPH_PREVIOUS_SECTION_CHAR_LIMIT = 1000
+    
     def __init__(
         self, 
         graph_id: str,
@@ -818,7 +825,7 @@ class ReportAgent:
         
         shared_llm = llm_client or LLMClient()
         self.json_llm = json_llm_client or shared_llm
-        self.reasoning_llm = reasoning_llm_client or shared_llm
+        self.reasoning_llm = reasoning_llm_client or self._build_local_reasoning_llm(shared_llm)
         self.llm = self.reasoning_llm
         self.zep_tools = zep_tools or ZepToolsService()
         
@@ -831,6 +838,23 @@ class ReportAgent:
         self.console_logger: Optional[ReportConsoleLogger] = None
         
         logger.info(f"ReportAgent 완료: graph_id={graph_id}, simulation_id={simulation_id}")
+    
+    def _is_local_graph_mode(self) -> bool:
+        return Config.GRAPH_BACKEND == 'local_sqlite'
+
+    def _build_local_reasoning_llm(self, fallback_llm: LLMClient) -> LLMClient:
+        if not self._is_local_graph_mode():
+            return fallback_llm
+        return LLMClient(
+            codex_broker=CodexBroker(
+                json_model=Config.CODEX_JSON_MODEL,
+                reasoning_model=Config.CODEX_JSON_MODEL,
+                json_reasoning_effort=Config.CODEX_JSON_REASONING_EFFORT,
+                reasoning_effort=Config.CODEX_JSON_REASONING_EFFORT,
+                service_tier=Config.CODEX_SERVICE_TIER,
+                sandbox=Config.CODEX_SANDBOX,
+            )
+        )
     
     def _define_tools(self) -> Dict[str, Dict[str, Any]]:
         """에이전트가 사용할 도구 메타데이터를 정의한다."""
@@ -1108,6 +1132,8 @@ class ReportAgent:
                     title=section_data.get("title", ""),
                     content=""
                 ))
+            if self._is_local_graph_mode():
+                sections = sections[:self.LOCAL_GRAPH_SECTION_LIMIT]
             
             outline = ReportOutline(
                 title=response.get("title", "시뮬레이션분석보고서"),
@@ -1127,11 +1153,17 @@ class ReportAgent:
             return ReportOutline(
                 title="보고서",
                 summary="시뮬레이션분석",
-                sections=[
-                    ReportSection(title=""),
-                    ReportSection(title="분석"),
-                    ReportSection(title="")
-                ]
+                sections=(
+                    [
+                        ReportSection(title="핵심 사실과 24시간 예측 시나리오"),
+                    ]
+                    if self._is_local_graph_mode() else
+                    [
+                        ReportSection(title=""),
+                        ReportSection(title="분석"),
+                        ReportSection(title="")
+                    ]
+                )
             )
     
     def _generate_section_react(
@@ -1179,9 +1211,16 @@ class ReportAgent:
         # prompt - 완료섹션4000
         if previous_sections:
             previous_parts = []
+            previous_section_limit = (
+                self.LOCAL_GRAPH_PREVIOUS_SECTION_CHAR_LIMIT
+                if self._is_local_graph_mode()
+                else 4000
+            )
             for sec in previous_sections:
-                # 섹션4000
-                truncated = sec[:4000] + "..." if len(sec) > 4000 else sec
+                truncated = (
+                    sec[:previous_section_limit] + "..."
+                    if len(sec) > previous_section_limit else sec
+                )
                 previous_parts.append(truncated)
             previous_content = "\n\n---\n\n".join(previous_parts)
         else:
@@ -1199,11 +1238,20 @@ class ReportAgent:
         
         # ReACT
         tool_calls_count = 0
-        max_iterations = 5  # 
-        min_tool_calls = 3  # 도구 호출
+        max_iterations = (
+            self.LOCAL_GRAPH_SECTION_MAX_ITERATIONS
+            if self._is_local_graph_mode()
+            else 5
+        )
+        min_tool_calls = 0 if Config.GRAPH_BACKEND == 'local_sqlite' else 3  # 도구 호출
         conflict_retries = 0  # 도구 호출Final Answer
         used_tools = set()  # 도구 호출
         all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        section_max_tokens = (
+            self.LOCAL_GRAPH_SECTION_MAX_TOKENS
+            if self._is_local_graph_mode()
+            else 4096
+        )
 
         # 보고서, InsightForge질문생성
         report_context = f"섹션: {section.title}\n시뮬레이션: {self.simulation_requirement}"
@@ -1220,7 +1268,7 @@ class ReportAgent:
             response = self.reasoning_llm.chat(
                 messages=messages,
                 temperature=0.5,
-                max_tokens=4096
+                max_tokens=section_max_tokens
             )
 
             #  LLM 반환 None(API )
@@ -1423,7 +1471,7 @@ class ReportAgent:
         response = self.reasoning_llm.chat(
             messages=messages,
             temperature=0.5,
-            max_tokens=4096
+            max_tokens=section_max_tokens
         )
 
         #  LLM 반환 None
@@ -1514,6 +1562,7 @@ class ReportAgent:
             
             # 1: 
             report.status = ReportStatus.PLANNING
+            ReportManager.save_report(report)
             ReportManager.update_progress(
                 report_id, "planning", 5, "시작보고서...",
                 completed_sections=[]
@@ -1546,6 +1595,7 @@ class ReportAgent:
             
             # 2: 섹션생성(섹션저장)
             report.status = ReportStatus.GENERATING
+            ReportManager.save_report(report)
             
             total_sections = len(outline.sections)
             generated_sections = []  # 저장
@@ -1589,6 +1639,7 @@ class ReportAgent:
                 # 저장섹션
                 ReportManager.save_section(report_id, section_num, section)
                 completed_section_titles.append(section.title)
+                ReportManager.save_report(report)
 
                 # 섹션완료로그
                 full_section_content = f"## {section.title}\n\n{section_content}"

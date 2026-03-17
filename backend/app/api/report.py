@@ -223,19 +223,20 @@ def get_generate_status():
         task_id = data.get('task_id')
         simulation_id = data.get('simulation_id')
         
-        # simulation_id, 완료보고서
+        # simulation_id, 저장된 보고서 상태 우선
         if simulation_id:
             existing_report = ReportManager.get_report_by_simulation(simulation_id)
-            if existing_report and existing_report.status == ReportStatus.COMPLETED:
+            if existing_report:
+                progress = ReportManager.get_progress(existing_report.report_id) or {}
                 return jsonify({
                     "success": True,
                     "data": {
                         "simulation_id": simulation_id,
                         "report_id": existing_report.report_id,
-                        "status": "completed",
-                        "progress": 100,
-                        "message": "보고서 생성",
-                        "already_completed": True
+                        "status": "completed" if existing_report.status == ReportStatus.COMPLETED else progress.get("status", existing_report.status.value),
+                        "progress": 100 if existing_report.status == ReportStatus.COMPLETED else progress.get("progress", 0),
+                        "message": progress.get("message", "보고서 생성"),
+                        "already_completed": existing_report.status == ReportStatus.COMPLETED
                     }
                 })
         
@@ -249,6 +250,21 @@ def get_generate_status():
         task = task_manager.get_task(task_id)
         
         if not task:
+            if simulation_id:
+                existing_report = ReportManager.get_report_by_simulation(simulation_id)
+                if existing_report:
+                    progress = ReportManager.get_progress(existing_report.report_id) or {}
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "simulation_id": simulation_id,
+                            "report_id": existing_report.report_id,
+                            "status": progress.get("status", existing_report.status.value),
+                            "progress": progress.get("progress", 0),
+                            "message": progress.get("message", "저장된 보고서 상태를 반환합니다."),
+                            "recovered_from_report": True
+                        }
+                    })
             return jsonify({
                 "success": False,
                 "error": f"작업이 존재하지 않습니다: {task_id}"
