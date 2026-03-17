@@ -56,7 +56,7 @@ def get_graph_entities(graph_id: str):
         enrich: 엣지정보(true)
     """
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.GRAPH_BACKEND != 'local_sqlite' and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY설정"
@@ -93,7 +93,7 @@ def get_graph_entities(graph_id: str):
 def get_entity_detail(graph_id: str, entity_uuid: str):
     """엔터티상세정보"""
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.GRAPH_BACKEND != 'local_sqlite' and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY설정"
@@ -126,7 +126,7 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
 def get_entities_by_type(graph_id: str, entity_type: str):
     """타입엔터티"""
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.GRAPH_BACKEND != 'local_sqlite' and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY설정"

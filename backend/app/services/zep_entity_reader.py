@@ -375,6 +375,51 @@ class ZepEntityReader:
         Returns:
             EntityNode 또는 None
         """
+        if self.graph_backend == 'local_sqlite':
+            all_nodes = self.get_all_nodes(graph_id)
+            node_map = {n["uuid"]: n for n in all_nodes}
+            node = node_map.get(entity_uuid)
+            if not node:
+                return None
+            edges = self.get_node_edges(entity_uuid)
+            related_edges = []
+            related_node_uuids = set()
+            for edge in edges:
+                if edge["source_node_uuid"] == entity_uuid:
+                    related_edges.append({
+                        "direction": "outgoing",
+                        "edge_name": edge["name"],
+                        "fact": edge["fact"],
+                        "target_node_uuid": edge["target_node_uuid"],
+                    })
+                    related_node_uuids.add(edge["target_node_uuid"])
+                else:
+                    related_edges.append({
+                        "direction": "incoming",
+                        "edge_name": edge["name"],
+                        "fact": edge["fact"],
+                        "source_node_uuid": edge["source_node_uuid"],
+                    })
+                    related_node_uuids.add(edge["source_node_uuid"])
+            related_nodes = []
+            for related_uuid in related_node_uuids:
+                if related_uuid in node_map:
+                    related_node = node_map[related_uuid]
+                    related_nodes.append({
+                        "uuid": related_node["uuid"],
+                        "name": related_node["name"],
+                        "labels": related_node["labels"],
+                        "summary": related_node.get("summary", ""),
+                    })
+            return EntityNode(
+                uuid=node["uuid"],
+                name=node["name"],
+                labels=node["labels"],
+                summary=node["summary"],
+                attributes=node["attributes"],
+                related_edges=related_edges,
+                related_nodes=related_nodes,
+            )
         try:
             # 재시도 래퍼로 노드 조회
             node = self._call_with_retry(

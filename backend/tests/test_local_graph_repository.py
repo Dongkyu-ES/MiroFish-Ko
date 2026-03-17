@@ -241,6 +241,10 @@ def test_zep_entity_reader_supports_local_sqlite_graph():
             assert filtered.filtered_count == 2
             assert sorted(filtered.entity_types) == ["MediaOutlet", "Student"]
             assert len(filtered.entities[0].related_edges) >= 1
+            detailed = reader.get_entity_with_context(graph_id, "n1")
+            assert detailed is not None
+            assert detailed.uuid == "n1"
+            assert len(detailed.related_edges) == 1
         finally:
             Config.GRAPH_BACKEND = original_backend
             Config.LOCAL_GRAPH_DB_PATH = original_db_path

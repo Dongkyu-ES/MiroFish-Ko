@@ -6,6 +6,9 @@
 - local reader/search/stat tests green
 - local memory updater tests green
 - live smoke로 build / generate-profiles / report tools / memory update 확인
+- live smoke로 prepare ready 확인
+- live smoke로 report generate completed 확인
+- live smoke로 start + graph_memory_update_enabled completed 및 graph edge 증가 확인
 
 ## Test Matrix
 
@@ -34,10 +37,16 @@
 2. local reader가 simulation profile generation에 사용 가능해야 함
 3. local search/stat API가 report tool endpoint에서 동작해야 함
 4. local memory updater가 action batch를 graph edge로 적재해야 함
+5. local prepare가 ready/completed까지 도달해야 함
+6. local report generate가 completed까지 도달해야 함
+7. local start + graph_memory_update_enabled가 completed까지 도달하고 graph edge 증가가 관측돼야 함
 
 ## Exit Criteria
 1. repository 테스트 green
 2. compileall green
 3. 최소 local build smoke green
 4. 최소 reader/search/stat/memory smoke green
-5. 문서화된 다음 slice 준비 완료
+5. prepare smoke green
+6. report completed smoke green
+7. start + graph memory smoke green
+8. 문서화된 다음 slice 준비 완료

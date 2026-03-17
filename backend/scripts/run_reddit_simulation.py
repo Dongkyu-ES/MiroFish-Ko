@@ -46,6 +46,7 @@ else:
 
 
 import re
+from action_logger import PlatformActionLogger, get_agent_names_from_config, fetch_new_actions_from_db_simple
 
 
 class UnicodeFormatter(logging.Formatter):
@@ -581,6 +582,15 @@ class RedditSimulationRunner:
         
         await self.env.reset()
         print("완료\n")
+
+        action_logger = PlatformActionLogger("reddit", self.simulation_dir)
+        action_logger.log_simulation_start(self.config)
+        agent_names = get_agent_names_from_config(self.config)
+        for agent_id, agent in self.agent_graph.get_agents():
+            if agent_id not in agent_names:
+                agent_names[agent_id] = getattr(agent, 'name', f'Agent_{agent_id}')
+        total_actions = 0
+        last_rowid = 0
         
         # IPC
         self.ipc_handler = IPCHandler(self.simulation_dir, self.env, self.agent_graph)
@@ -589,6 +599,8 @@ class RedditSimulationRunner:
         # 
         event_config = self.config.get("event_config", {})
         initial_posts = event_config.get("initial_posts", [])
+        action_logger.log_round_start(0, 0)
+        initial_action_count = 0
         
         if initial_posts:
             print(f" ({len(initial_posts)})...")
@@ -610,12 +622,22 @@ class RedditSimulationRunner:
                             action_type=ActionType.CREATE_POST,
                             action_args={"content": content}
                         )
+                    action_logger.log_action(
+                        round_num=0,
+                        agent_id=agent_id,
+                        agent_name=agent_names.get(agent_id, f"Agent_{agent_id}"),
+                        action_type="CREATE_POST",
+                        action_args={"content": content}
+                    )
+                    total_actions += 1
+                    initial_action_count += 1
                 except Exception as e:
                     print(f"  경고: Agent {agent_id}: {e}")
             
             if initial_actions:
                 await self.env.step(initial_actions)
                 print(f"   {len(initial_actions)}건")
+        action_logger.log_round_end(0, initial_action_count)
         
         # 시뮬레이션
         print("\n시작시뮬레이션...")
@@ -629,8 +651,10 @@ class RedditSimulationRunner:
             active_agents = self._get_active_agents_for_round(
                 self.env, simulated_hour, round_num
             )
+            action_logger.log_round_start(round_num + 1, simulated_hour)
             
             if not active_agents:
+                action_logger.log_round_end(round_num + 1, 0)
                 continue
             
             actions = {
@@ -639,6 +663,21 @@ class RedditSimulationRunner:
             }
             
             await self.env.step(actions)
+            actual_actions, last_rowid = fetch_new_actions_from_db_simple(
+                db_path, last_rowid, agent_names
+            )
+            round_action_count = 0
+            for action_data in actual_actions:
+                action_logger.log_action(
+                    round_num=round_num + 1,
+                    agent_id=action_data['agent_id'],
+                    agent_name=action_data['agent_name'],
+                    action_type=action_data['action_type'],
+                    action_args=action_data['action_args']
+                )
+                total_actions += 1
+                round_action_count += 1
+            action_logger.log_round_end(round_num + 1, round_action_count)
             
             if (round_num + 1) % 10 == 0 or round_num == 0:
                 elapsed = (datetime.now() - start_time).total_seconds()
@@ -649,6 +688,7 @@ class RedditSimulationRunner:
                       f"- elapsed: {elapsed:.1f}s")
         
         total_elapsed = (datetime.now() - start_time).total_seconds()
+        action_logger.log_simulation_end(total_rounds, total_actions)
         print(f"\n시뮬레이션 완료!")
         print(f"  - : {total_elapsed:.1f}")
         print(f"  - : {db_path}")

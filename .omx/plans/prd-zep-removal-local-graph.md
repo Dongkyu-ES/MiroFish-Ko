@@ -14,7 +14,9 @@
   - `/api/report/tools/search` 성공
   - `/api/report/tools/statistics` 성공
   - local memory updater 직접 smoke 성공
-- `report generate`도 local graph 기준으로 시작되어 outline 생성 및 section generation 진입까지 확인됨
+- `report generate`가 local graph 기준으로 **completed**까지 확인됨 (`report_76f043c5c6fc`)
+- `prepare`가 local graph 기준으로 **ready**까지 확인됨 (`sim_6a14707b0e16`)
+- `start + graph_memory_update_enabled=true`가 local graph 기준으로 **completed**까지 확인되었고, 실행 후 graph edge 수가 증가함 (`sim_7a97e33b3088`, edge delta `+5`)
 
 ## Requirements Summary
 - 현재 그래프 구축/조회/검색/메모리 업데이트는 ZEP Cloud에 강하게 결합돼 있다 (`backend/app/services/graph_builder.py`, `backend/app/services/zep_entity_reader.py`, `backend/app/services/zep_tools.py`, `backend/app/services/zep_graph_memory_updater.py`).
@@ -86,12 +88,16 @@
 - live local reader smoke: `/api/simulation/generate-profiles` 성공
 - live local tool smoke: `/api/report/tools/search`, `/api/report/tools/statistics` 성공
 - live local memory smoke: `FOLLOW`, `CREATE_POST` action 반영 확인
+- live local report smoke: `report_76f043c5c6fc` completed, markdown 길이 확인
+- live local prepare smoke: `sim_6a14707b0e16` ready, `profiles_count=4`, `config_generated=true`
+- live local start smoke: `sim_7a97e33b3088` completed, `total_actions_count=9`, graph edge delta `+5`
 
 ## Remaining Gaps
 - 서비스 클래스 이름/역할은 아직 `Zep*` 명칭을 유지하는 경우가 많다.
 - `GRAPH_BACKEND=zep` 경로와 공존하는 과도기 상태라 import 수준에서 zep 관련 코드가 남아 있다.
-- simulation prepare/start/report의 전체 장기 E2E 완주 증거는 아직 부족하다.
+- local graph 기준 핵심 E2E는 확보했지만, 장시간/대규모 입력에서의 안정성 증거는 아직 부족하다.
 - local graph 검색 품질은 현재 simple lexical/local heuristic 중심이다.
+- 단일 플랫폼 스크립트 로그 경로는 보강됐지만, parallel 스크립트와의 중복/공통화 정리는 아직 남아 있다.
 
 ## Risks and Mitigations
 - **리스크:** ZEP가 자동으로 해주던 graph extraction 품질이 떨어질 수 있다.  
@@ -104,8 +110,11 @@
 2. compileall 통과
 3. local build smoke
 4. local reader/search/stat/memory smoke
+5. local prepare smoke
+6. local report completed smoke
+7. local start + graph memory smoke
 
 ## Next Execution Slice
-1. `report generate` 완료까지의 안정화 검증
-2. `prepare` / `start` / `graph_memory_update_enabled` 경로 local graph 기준 심화 검증
-3. 남은 ZEP 명명/조건부 import 정리
+1. 남은 `Zep*` 명명/조건부 import 정리
+2. local graph search 품질 개선(lexical → richer ranking)
+3. parallel/single-platform 스크립트 로깅 공통화

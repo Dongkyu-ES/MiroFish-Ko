@@ -15,8 +15,9 @@ OASIS 시뮬레이션에서 각 Agent의 동작을 기록해 백엔드 모니터
 import json
 import os
 import logging
+import sqlite3
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 
 
 class PlatformActionLogger:
@@ -64,7 +65,7 @@ class PlatformActionLogger:
         
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
-    
+
     def log_round_start(self, round_num: int, simulated_hour: int):
         """라운드 시작 이벤트를 기록한다."""
         entry = {
@@ -114,6 +115,95 @@ class PlatformActionLogger:
         
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+
+FILTERED_ACTIONS = {'refresh', 'sign_up'}
+
+ACTION_TYPE_MAP = {
+    'post': 'CREATE_POST',
+    'comment': 'CREATE_COMMENT',
+    'like_post': 'LIKE_POST',
+    'dislike_post': 'DISLIKE_POST',
+    'like_comment': 'LIKE_COMMENT',
+    'dislike_comment': 'DISLIKE_COMMENT',
+    'repost': 'REPOST',
+    'quote': 'QUOTE_POST',
+    'follow': 'FOLLOW',
+    'mute': 'MUTE',
+    'search_posts': 'SEARCH_POSTS',
+    'search_user': 'SEARCH_USER',
+    'trend': 'TREND',
+    'interview': 'INTERVIEW',
+}
+
+
+def get_agent_names_from_config(config: Dict[str, Any]) -> Dict[int, str]:
+    """simulation_config에서 agent_id -> entity_name 매핑을 만든다."""
+    agent_names = {}
+    for agent_config in config.get("agent_configs", []):
+        agent_id = agent_config.get("agent_id")
+        if agent_id is not None:
+            agent_names[agent_id] = agent_config.get("entity_name", f"Agent_{agent_id}")
+    return agent_names
+
+
+def fetch_new_actions_from_db_simple(
+    db_path: str,
+    last_rowid: int,
+    agent_names: Dict[int, str]
+) -> Tuple[List[Dict[str, Any]], int]:
+    """SQLite trace 테이블에서 새 액션을 읽어 actions.jsonl용 단순 구조로 변환한다."""
+    actions: List[Dict[str, Any]] = []
+    new_last_rowid = last_rowid
+
+    if not os.path.exists(db_path):
+        return actions, new_last_rowid
+
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT rowid, user_id, action, info
+            FROM trace
+            WHERE rowid > ?
+            ORDER BY rowid ASC
+            """,
+            (last_rowid,),
+        )
+
+        for rowid, user_id, action, info_json in cursor.fetchall():
+            new_last_rowid = rowid
+            if action in FILTERED_ACTIONS:
+                continue
+
+            try:
+                raw_args = json.loads(info_json) if info_json else {}
+            except json.JSONDecodeError:
+                raw_args = {}
+
+            action_args = {}
+            for key in (
+                'content', 'post_id', 'comment_id', 'quoted_id', 'new_post_id',
+                'follow_id', 'query', 'like_id', 'dislike_id', 'target_user_name',
+                'target_user', 'post_author_name', 'original_author_name',
+                'comment_author_name'
+            ):
+                if key in raw_args:
+                    action_args[key] = raw_args[key]
+
+            actions.append({
+                'agent_id': user_id,
+                'agent_name': agent_names.get(user_id, f'Agent_{user_id}'),
+                'action_type': ACTION_TYPE_MAP.get(action, action.upper()),
+                'action_args': action_args,
+            })
+
+        conn.close()
+    except Exception as e:
+        print(f"읽기실패: {e}")
+
+    return actions, new_last_rowid
 
 
 class SimulationLogManager:
