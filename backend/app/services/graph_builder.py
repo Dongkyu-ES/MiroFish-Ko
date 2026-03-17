@@ -9,6 +9,7 @@ import time
 import threading
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
+from collections import OrderedDict
 
 from zep_cloud.client import Zep
 from zep_cloud import EpisodeData, EntityEdgeSourceTarget
@@ -16,6 +17,8 @@ from zep_cloud import EpisodeData, EntityEdgeSourceTarget
 from ..config import Config
 from ..models.task import TaskManager, TaskStatus
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
+from ..utils.llm_client import LLMClient
+from .local_graph_repository import LocalGraphRepository
 from .text_processor import TextProcessor
 
 
@@ -42,12 +45,19 @@ class GraphBuilderService:
     Zep API를 호출해 지식 그래프를 구축한다.
     """
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, llm_client: Optional[LLMClient] = None):
+        self.graph_backend = Config.GRAPH_BACKEND
         self.api_key = api_key or Config.ZEP_API_KEY
-        if not self.api_key:
-            raise ValueError("ZEP_API_KEY가 설정되지 않았습니다")
+        self.local_repo = None
+        self.client = None
+        self.llm_client = llm_client or LLMClient()
         
-        self.client = Zep(api_key=self.api_key)
+        if self.graph_backend == 'local_sqlite':
+            self.local_repo = LocalGraphRepository()
+        else:
+            if not self.api_key:
+                raise ValueError("ZEP_API_KEY가 설정되지 않았습니다")
+            self.client = Zep(api_key=self.api_key)
         self.task_manager = TaskManager()
     
     def build_graph_async(
@@ -73,6 +83,11 @@ class GraphBuilderService:
         Returns:
             작업 ID
         """
+        if self.graph_backend == 'local_sqlite':
+            raise NotImplementedError(
+                "local_sqlite 그래프 구축 파이프라인은 아직 연결되지 않았습니다. "
+                "현재 slice에서는 repository 계층만 도입되었습니다."
+            )
         # 작업 생성
         task_id = self.task_manager.create_task(
             task_type="graph_build",
@@ -186,6 +201,11 @@ class GraphBuilderService:
     
     def create_graph(self, name: str) -> str:
         """Zep 그래프를 생성한다(공개 메서드)."""
+        if self.graph_backend == 'local_sqlite':
+            return self.local_repo.create_graph(
+                name=name,
+                description="MiroFish Local Graph"
+            )
         graph_id = f"mirofish_{uuid.uuid4().hex[:16]}"
         
         self.client.graph.create(
@@ -198,6 +218,9 @@ class GraphBuilderService:
     
     def set_ontology(self, graph_id: str, ontology: Dict[str, Any]):
         """그래프 온톨로지를 설정한다(공개 메서드)."""
+        if self.graph_backend == 'local_sqlite':
+            self.local_repo.save_ontology(graph_id, ontology)
+            return
         import warnings
         from typing import Optional
         from pydantic import Field
@@ -293,6 +316,14 @@ class GraphBuilderService:
         progress_callback: Optional[Callable] = None
     ) -> List[str]:
         """텍스트를 그래프에 배치로 추가하고 episode uuid 목록을 반환한다."""
+        if self.graph_backend == 'local_sqlite':
+            return self._build_local_graph_from_chunks(
+                graph_id=graph_id,
+                chunks=chunks,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+            )
+
         episode_uuids = []
         total_chunks = len(chunks)
         
@@ -345,6 +376,11 @@ class GraphBuilderService:
         timeout: int = 600
     ):
         """모든 episode 처리 완료를 기다린다(각 episode의 processed 상태 조회)."""
+        if self.graph_backend == 'local_sqlite':
+            if progress_callback:
+                progress_callback("로컬 그래프 저장 완료", 1.0)
+            return
+
         if not episode_uuids:
             if progress_callback:
                 progress_callback("대기할 episode가 없습니다", 1.0)
@@ -396,6 +432,14 @@ class GraphBuilderService:
     
     def _get_graph_info(self, graph_id: str) -> GraphInfo:
         """그래프 정보를 조회한다."""
+        if self.graph_backend == 'local_sqlite':
+            info = self.local_repo.get_graph_info(graph_id)
+            return GraphInfo(
+                graph_id=info.graph_id,
+                node_count=info.node_count,
+                edge_count=info.edge_count,
+                entity_types=info.entity_types,
+            )
         # 노드 조회(페이지네이션)
         nodes = fetch_all_nodes(self.client, graph_id)
 
@@ -427,6 +471,8 @@ class GraphBuilderService:
         Returns:
             nodes/edges와 시간/속성 등 상세 정보를 포함한 dict
         """
+        if self.graph_backend == 'local_sqlite':
+            return self.local_repo.get_graph_data(graph_id)
         nodes = fetch_all_nodes(self.client, graph_id)
         edges = fetch_all_edges(self.client, graph_id)
 
@@ -496,4 +542,157 @@ class GraphBuilderService:
     
     def delete_graph(self, graph_id: str):
         """그래프를 삭제한다."""
+        if self.graph_backend == 'local_sqlite':
+            self.local_repo.delete_graph(graph_id)
+            return
         self.client.graph.delete(graph_id=graph_id)
+
+    def _build_local_graph_from_chunks(
+        self,
+        graph_id: str,
+        chunks: List[str],
+        batch_size: int,
+        progress_callback: Optional[Callable] = None,
+    ) -> List[str]:
+        graph = self.local_repo.get_graph(graph_id) or {}
+        ontology = graph.get("ontology") or {}
+        total_chunks = len(chunks)
+        merged_nodes: "OrderedDict[tuple, Dict[str, Any]]" = OrderedDict()
+        merged_edges: "OrderedDict[tuple, Dict[str, Any]]" = OrderedDict()
+        pseudo_episode_ids: List[str] = []
+
+        for i in range(0, total_chunks, batch_size):
+            batch_chunks = chunks[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (total_chunks + batch_size - 1) // batch_size
+            if progress_callback:
+                progress_callback(
+                    f"로컬 그래프 추출 중 {batch_num}/{total_batches}...",
+                    (i + len(batch_chunks)) / max(total_chunks, 1),
+                )
+
+            extracted = self._extract_graph_from_text_batch(
+                text="\n\n".join(batch_chunks),
+                ontology=ontology,
+            )
+            self._merge_extracted_graph(merged_nodes, merged_edges, extracted)
+            pseudo_episode_ids.extend([f"local_{graph_id}_{i+j}" for j in range(len(batch_chunks))])
+
+        self.local_repo.replace_graph_data(
+            graph_id=graph_id,
+            nodes=list(merged_nodes.values()),
+            edges=list(merged_edges.values()),
+        )
+        return pseudo_episode_ids
+
+    def _extract_graph_from_text_batch(self, text: str, ontology: Dict[str, Any]) -> Dict[str, Any]:
+        allowed_entity_types = [e.get("name") for e in ontology.get("entity_types", []) if e.get("name")]
+        allowed_edge_types = [e.get("name") for e in ontology.get("edge_types", []) if e.get("name")]
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "당신은 문서에서 지식 그래프 노드와 엣지를 추출하는 시스템입니다. "
+                    "반드시 JSON만 반환하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"""다음 텍스트에서 엔터티와 관계를 추출하세요.
+
+허용 엔터티 타입: {allowed_entity_types}
+허용 관계 타입: {allowed_edge_types}
+
+반환 형식:
+{{
+  "nodes": [
+    {{
+      "name": "엔터티명",
+      "labels": ["Entity", "타입명"],
+      "summary": "요약",
+      "attributes": {{}}
+    }}
+  ],
+  "edges": [
+    {{
+      "name": "관계타입",
+      "fact": "관계 사실 한 문장",
+      "source_node_name": "출발 엔터티명",
+      "target_node_name": "도착 엔터티명",
+      "attributes": {{}}
+    }}
+  ]
+}}
+
+텍스트:
+\"\"\"
+{text[:12000]}
+\"\"\"""",
+            },
+        ]
+
+        try:
+            result = self.llm_client.chat_json(messages=messages, temperature=0.2, max_tokens=4096)
+            return result if isinstance(result, dict) else {"nodes": [], "edges": []}
+        except Exception:
+            return {"nodes": [], "edges": []}
+
+    def _merge_extracted_graph(
+        self,
+        merged_nodes: "OrderedDict[tuple, Dict[str, Any]]",
+        merged_edges: "OrderedDict[tuple, Dict[str, Any]]",
+        extracted: Dict[str, Any],
+    ) -> None:
+        node_name_to_uuid: Dict[str, str] = {
+            node["name"]: node["uuid"]
+            for node in merged_nodes.values()
+            if node.get("name")
+        }
+
+        for node in extracted.get("nodes", []) or []:
+            name = (node.get("name") or "").strip()
+            labels = node.get("labels") or ["Entity"]
+            if not name:
+                continue
+            labels = [label for label in labels if label] or ["Entity"]
+            if "Entity" not in labels:
+                labels.insert(0, "Entity")
+            key = (name.lower(), tuple(sorted(labels)))
+            if key not in merged_nodes:
+                node_uuid = f"local_node_{uuid.uuid4().hex[:12]}"
+                merged_nodes[key] = {
+                    "uuid": node_uuid,
+                    "name": name,
+                    "labels": labels,
+                    "summary": node.get("summary", ""),
+                    "attributes": node.get("attributes", {}) or {},
+                    "created_at": None,
+                }
+                node_name_to_uuid[name] = node_uuid
+
+        for edge in extracted.get("edges", []) or []:
+            source_name = (edge.get("source_node_name") or "").strip()
+            target_name = (edge.get("target_node_name") or "").strip()
+            edge_name = (edge.get("name") or "").strip()
+            if not source_name or not target_name or not edge_name:
+                continue
+            source_uuid = node_name_to_uuid.get(source_name)
+            target_uuid = node_name_to_uuid.get(target_name)
+            if not source_uuid or not target_uuid:
+                continue
+            key = (edge_name.lower(), source_uuid, target_uuid, (edge.get("fact") or "").strip().lower())
+            if key not in merged_edges:
+                merged_edges[key] = {
+                    "uuid": f"local_edge_{uuid.uuid4().hex[:12]}",
+                    "name": edge_name,
+                    "fact": edge.get("fact", ""),
+                    "source_node_uuid": source_uuid,
+                    "target_node_uuid": target_uuid,
+                    "attributes": edge.get("attributes", {}) or {},
+                    "created_at": None,
+                    "valid_at": None,
+                    "invalid_at": None,
+                    "expired_at": None,
+                    "episodes": [],
+                }

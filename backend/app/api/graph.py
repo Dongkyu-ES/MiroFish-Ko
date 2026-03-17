@@ -276,7 +276,7 @@ def build_graph():
         
         # 설정 확인
         errors = []
-        if not Config.ZEP_API_KEY:
+        if Config.GRAPH_BACKEND != 'local_sqlite' and not Config.ZEP_API_KEY:
             errors.append("ZEP_API_KEY가 설정되지 않았습니다")
         if errors:
             logger.error(f"설정 오류: {errors}")
@@ -392,7 +392,7 @@ def build_graph():
                 # 그래프 생성
                 task_manager.update_task(
                     task_id,
-                    message="Zep 그래프 생성...",
+                    message="그래프 생성...",
                     progress=10
                 )
                 graph_id = builder.create_graph(name=graph_name)
@@ -431,10 +431,10 @@ def build_graph():
                     progress_callback=add_progress_callback
                 )
                 
-                # Zep 처리 완료 대기(각 episode processed 상태 확인)
+                # 그래프 처리 완료 대기
                 task_manager.update_task(
                     task_id,
-                    message="Zep 데이터 처리 대기 중...",
+                    message="그래프 데이터 처리 대기 중...",
                     progress=55
                 )
                 
@@ -553,7 +553,7 @@ def list_tasks():
 def get_graph_data(graph_id: str):
     """그래프 데이터(노드/엣지)를 조회한다."""
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.GRAPH_BACKEND != 'local_sqlite' and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY가 설정되지 않았습니다"
@@ -577,9 +577,9 @@ def get_graph_data(graph_id: str):
 
 @graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
 def delete_graph(graph_id: str):
-    """Zep 그래프를 삭제한다."""
+    """그래프를 삭제한다."""
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.GRAPH_BACKEND != 'local_sqlite' and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY가 설정되지 않았습니다"

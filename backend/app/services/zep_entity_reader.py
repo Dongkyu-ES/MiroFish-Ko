@@ -12,6 +12,7 @@ from zep_cloud.client import Zep
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
+from .local_graph_repository import LocalGraphRepository
 
 logger = get_logger('mirofish.zep_entity_reader')
 
@@ -80,10 +81,16 @@ class ZepEntityReader:
     
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or Config.ZEP_API_KEY
-        if not self.api_key:
-            raise ValueError("ZEP_API_KEY가 설정되지 않았습니다")
+        self.graph_backend = Config.GRAPH_BACKEND
+        self.local_repo = None
+        self.client = None
         
-        self.client = Zep(api_key=self.api_key)
+        if self.graph_backend == 'local_sqlite':
+            self.local_repo = LocalGraphRepository()
+        else:
+            if not self.api_key:
+                raise ValueError("ZEP_API_KEY가 설정되지 않았습니다")
+            self.client = Zep(api_key=self.api_key)
     
     def _call_with_retry(
         self, 
@@ -134,6 +141,9 @@ class ZepEntityReader:
         Returns:
             노드 목록
         """
+        if self.graph_backend == 'local_sqlite':
+            data = self.local_repo.get_graph_data(graph_id)
+            return data.get("nodes", [])
         logger.info(f"그래프 {graph_id}의 전체 노드 조회 중...")
 
         nodes = fetch_all_nodes(self.client, graph_id)
@@ -161,6 +171,9 @@ class ZepEntityReader:
         Returns:
             엣지 목록
         """
+        if self.graph_backend == 'local_sqlite':
+            data = self.local_repo.get_graph_data(graph_id)
+            return data.get("edges", [])
         logger.info(f"그래프 {graph_id}의 전체 엣지 조회 중...")
 
         edges = fetch_all_edges(self.client, graph_id)
@@ -189,6 +202,21 @@ class ZepEntityReader:
         Returns:
             엣지 목록
         """
+        if self.graph_backend == 'local_sqlite':
+            graph = None
+            with self.local_repo._connect() as conn:
+                row = conn.execute(
+                    "SELECT graph_id FROM nodes WHERE uuid = ?",
+                    (node_uuid,),
+                ).fetchone()
+                graph = row["graph_id"] if row else None
+            if not graph:
+                return []
+            edges = self.get_all_edges(graph)
+            return [
+                edge for edge in edges
+                if edge["source_node_uuid"] == node_uuid or edge["target_node_uuid"] == node_uuid
+            ]
         try:
             # 재시도 래퍼로 Zep API 호출
             edges = self._call_with_retry(
@@ -435,4 +463,3 @@ class ZepEntityReader:
             enrich_with_edges=enrich_with_edges
         )
         return result.entities
-

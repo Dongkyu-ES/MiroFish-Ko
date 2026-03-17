@@ -52,6 +52,13 @@ class Config:
     # Zep 설정
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
     
+    # 그래프 백엔드 설정
+    GRAPH_BACKEND = os.environ.get('GRAPH_BACKEND', 'zep')
+    LOCAL_GRAPH_DB_PATH = os.environ.get(
+        'LOCAL_GRAPH_DB_PATH',
+        os.path.join(os.path.dirname(__file__), '../uploads/local_graphs.sqlite3')
+    )
+    
     # 파일 업로드 설정
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')
@@ -83,6 +90,10 @@ class Config:
     @classmethod
     def uses_codex_cli(cls) -> bool:
         return True
+
+    @classmethod
+    def uses_local_graph(cls) -> bool:
+        return cls.GRAPH_BACKEND == 'local_sqlite'
     
     @classmethod
     def validate(cls):
@@ -90,6 +101,6 @@ class Config:
         errors = []
         if not shutil.which(cls.CODEX_BIN):
             errors.append(f"CODEX_BIN 실행 파일을 찾을 수 없습니다: {cls.CODEX_BIN}")
-        if not cls.ZEP_API_KEY:
+        if not cls.uses_local_graph() and not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY가 설정되지 않았습니다.")
         return errors

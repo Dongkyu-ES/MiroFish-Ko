@@ -16,6 +16,7 @@ from zep_cloud.client import Zep
 
 from ..config import Config
 from ..utils.logger import get_logger
+from .local_graph_repository import LocalGraphRepository
 
 logger = get_logger('mirofish.zep_graph_memory_updater')
 
@@ -232,12 +233,17 @@ class ZepGraphMemoryUpdater:
             api_key: Zep API Key(선택, 설정읽기)
         """
         self.graph_id = graph_id
+        self.graph_backend = Config.GRAPH_BACKEND
         self.api_key = api_key or Config.ZEP_API_KEY
+        self.local_repo = None
+        self.client = None
         
-        if not self.api_key:
-            raise ValueError("ZEP_API_KEY설정")
-        
-        self.client = Zep(api_key=self.api_key)
+        if self.graph_backend == 'local_sqlite':
+            self.local_repo = LocalGraphRepository()
+        else:
+            if not self.api_key:
+                raise ValueError("ZEP_API_KEY설정")
+            self.client = Zep(api_key=self.api_key)
         
         # 
         self._activity_queue: Queue = Queue()
@@ -396,6 +402,29 @@ class ZepGraphMemoryUpdater:
         # , 
         episode_texts = [activity.to_episode_text() for activity in activities]
         combined_text = "\n".join(episode_texts)
+
+        if self.graph_backend == 'local_sqlite':
+            inserted = self.local_repo.append_activity_batch(
+                self.graph_id,
+                [
+                    {
+                        "platform": activity.platform,
+                        "agent_id": activity.agent_id,
+                        "agent_name": activity.agent_name,
+                        "action_type": activity.action_type,
+                        "action_args": activity.action_args,
+                        "round_num": activity.round_num,
+                        "timestamp": activity.timestamp,
+                        "fact": activity.to_episode_text(),
+                    }
+                    for activity in activities
+                ],
+            )
+            self._total_sent += 1
+            self._total_items_sent += inserted
+            display_name = self._get_platform_display_name(platform)
+            logger.info(f" 로컬 그래프 {len(activities)}건{display_name}메모리 반영: {self.graph_id}")
+            return
         
         # 
         for attempt in range(self.MAX_RETRIES):

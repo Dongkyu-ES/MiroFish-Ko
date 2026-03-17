@@ -1,5 +1,21 @@
 # PRD: Codex CLI 기반 LLM 계층 전환
 
+## Current Status
+- **상태:** 대부분 완료
+- 공용 LLM 계층은 `CodexBroker` 기반으로 전환되었고, backend 런타임은 Codex CLI 전용으로 정리됐다.
+- 다음 경로가 공용 Codex 계층을 사용하도록 전환 완료:
+  - `backend/app/services/ontology_generator.py`
+  - `backend/app/services/simulation_config_generator.py`
+  - `backend/app/services/oasis_profile_generator.py`
+  - `backend/app/services/report_agent.py`
+  - `backend/app/services/zep_tools.py`
+- live smoke 완료:
+  - `LLMClient.chat_json()` → Codex JSON lane 성공
+  - `LLMClient.chat()` → Codex reasoning lane 성공
+  - Flask 앱 부팅 + `/health` 성공
+  - `/api/graph/ontology/generate` 성공
+- OpenAI 호환 fallback runtime path와 backend dependency는 제거되었다.
+
 ## Requirements Summary
 - 목표는 OpenAI 호환 API 키 호출 계층을 Codex CLI 기반 실행 계층으로 점진 전환해 **추가 API 과금 의존성을 제거**하는 것이다.
 - 현재 LLM 설정은 OpenAI 호환 전제를 두고 있다 (`backend/app/config.py:30-33`).
@@ -25,7 +41,7 @@
 - `.env.example`에 Codex 설정 문서화
 - 최소 단위 자동 테스트 추가
 
-### Out of Scope (이번 실행분)
+### Out of Scope (현재도 남음)
 - `oasis_profile_generator.py` 직접 전환
 - `simulation_config_generator.py` 직접 전환
 - `report_agent.py` 구조 분해
@@ -41,7 +57,8 @@
 
 ## Implementation Plan
 
-### Phase 1 — 공용 브로커/설정 도입 (이번 실행분)
+### Phase 1 — 공용 브로커/설정 도입
+**상태: 완료**
 1. `backend/app/config.py`
    - `LLM_PROVIDER`
    - `CODEX_BIN`
@@ -65,19 +82,35 @@
    - provider routing 테스트 추가
 
 ### Phase 2 — 직접 OpenAI 호출 제거
+**상태: 완료**
 1. `backend/app/services/simulation_config_generator.py`
 2. `backend/app/services/oasis_profile_generator.py`
 3. 필요 시 공통 prompt/schema builder 분리
 
 ### Phase 3 — Report/Tool 계층 전환
+**상태: 완료(1차 lane 분리까지)**
 1. `backend/app/services/report_agent.py`
 2. `backend/app/services/zep_tools.py`
 3. section별 reasoning / tool summary lane 분리
 
 ### Phase 4 — 장기 작업화/비동기화
+**상태: 미완**
 1. Codex async task manager 추가
 2. `prepare`, `report generate`, `interview` 경로의 장기 작업화
 3. 재시작 복구 가능한 task persistence 강화
+
+## Completed Evidence
+- 단위 테스트: `backend/tests/test_llm_client_provider.py`
+- 검증 결과: Codex provider 관련 테스트 green
+- 수동 smoke:
+  - `chat_json` live success
+  - `chat` live success
+  - `ontology/generate` live success
+
+## Remaining Gaps
+- `report generate`는 local graph 기준으로 실제 실행이 시작되고 섹션 생성 진입까지 확인했으나, 최종 completed까지의 장시간 smoke 증거는 아직 없다.
+- async orchestration/task persistence 개선은 아직 미진행이다.
+- Codex 호출량/지연 최적화는 아직 후속 과제다.
 
 ## Risks and Mitigations
 - **리스크:** `codex exec` 응답 형식이 JSON-only를 깨뜨릴 수 있다.  
@@ -108,5 +141,7 @@
 - `backend/tests/test_llm_client_provider.py`
 
 ## Next Execution Slice
-이번 실행은 **Phase 1**만 구현한다.  
-즉, “브로커/설정/공용 래퍼 전환 + 테스트”까지 완료하고, 이후 후속 순서는 `simulation_config_generator.py` → `oasis_profile_generator.py` → `report_agent.py` 순으로 진행한다.
+이 PRD 기준 남은 실질 작업은:
+1. `report generate` 완료까지의 안정화 검증
+2. `prepare/report/interview` 장기 작업 비동기 최적화
+3. Codex task persistence/재개 전략 보강

@@ -19,6 +19,7 @@ from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
+from .local_graph_repository import LocalGraphRepository
 
 logger = get_logger('mirofish.zep_tools')
 
@@ -428,11 +429,16 @@ class ZepToolsService:
         json_llm_client: Optional[LLMClient] = None,
         reasoning_llm_client: Optional[LLMClient] = None,
     ):
+        self.graph_backend = Config.GRAPH_BACKEND
         self.api_key = api_key or Config.ZEP_API_KEY
-        if not self.api_key:
-            raise ValueError("ZEP_API_KEY 설정")
-        
-        self.client = Zep(api_key=self.api_key)
+        self.local_repo = None
+        self.client = None
+        if self.graph_backend == 'local_sqlite':
+            self.local_repo = LocalGraphRepository()
+        else:
+            if not self.api_key:
+                raise ValueError("ZEP_API_KEY 설정")
+            self.client = Zep(api_key=self.api_key)
         # LLMInsightForge생성질문
         self._llm_client = llm_client
         self._json_llm_client = json_llm_client
@@ -504,6 +510,8 @@ class ZepToolsService:
             SearchResult: 검색
         """
         logger.info(f"그래프검색: graph_id={graph_id}, query={query[:50]}...")
+        if self.graph_backend == 'local_sqlite':
+            return self._local_search(graph_id, query, limit, scope)
         
         # Zep Cloud Search API
         try:
@@ -678,6 +686,18 @@ class ZepToolsService:
             노드목록
         """
         logger.info(f"그래프 {graph_id} 노드...")
+        if self.graph_backend == 'local_sqlite':
+            data = self.local_repo.get_graph_data(graph_id)
+            return [
+                NodeInfo(
+                    uuid=node.get("uuid", ""),
+                    name=node.get("name", ""),
+                    labels=node.get("labels", []),
+                    summary=node.get("summary", ""),
+                    attributes=node.get("attributes", {}),
+                )
+                for node in data.get("nodes", [])
+            ]
 
         nodes = fetch_all_nodes(self.client, graph_id)
 
@@ -707,6 +727,24 @@ class ZepToolsService:
             엣지목록(created_at, valid_at, invalid_at, expired_at)
         """
         logger.info(f"그래프 {graph_id} 엣지...")
+        if self.graph_backend == 'local_sqlite':
+            data = self.local_repo.get_graph_data(graph_id)
+            return [
+                EdgeInfo(
+                    uuid=edge.get("uuid", ""),
+                    name=edge.get("name", ""),
+                    fact=edge.get("fact", ""),
+                    source_node_uuid=edge.get("source_node_uuid", ""),
+                    target_node_uuid=edge.get("target_node_uuid", ""),
+                    source_node_name=edge.get("source_node_name"),
+                    target_node_name=edge.get("target_node_name"),
+                    created_at=edge.get("created_at"),
+                    valid_at=edge.get("valid_at"),
+                    invalid_at=edge.get("invalid_at"),
+                    expired_at=edge.get("expired_at"),
+                )
+                for edge in data.get("edges", [])
+            ]
 
         edges = fetch_all_edges(self.client, graph_id)
 
@@ -744,6 +782,21 @@ class ZepToolsService:
             노드정보None
         """
         logger.info(f"노드: {node_uuid[:8]}...")
+        if self.graph_backend == 'local_sqlite':
+            with self.local_repo._connect() as conn:
+                row = conn.execute(
+                    "SELECT name, labels_json, summary, attributes_json FROM nodes WHERE uuid = ?",
+                    (node_uuid,),
+                ).fetchone()
+            if not row:
+                return None
+            return NodeInfo(
+                uuid=node_uuid,
+                name=row["name"] or "",
+                labels=json.loads(row["labels_json"]),
+                summary=row["summary"] or "",
+                attributes=json.loads(row["attributes_json"]),
+            )
         
         try:
             node = self._call_with_retry(
