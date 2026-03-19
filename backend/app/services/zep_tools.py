@@ -13,9 +13,16 @@ import json
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 
+from ..config import Config
+
+if Config.GRAPH_BACKEND == "local_primary":
+    from backend.bootstrap_graph_backend import bootstrap_graph_backend
+
+    bootstrap_graph_backend()
+
 from zep_cloud.client import Zep
 
-from ..config import Config
+from ..parity_engine.shadow_eval import ShadowEvalCollector
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
@@ -422,11 +429,15 @@ class ZepToolsService:
     RETRY_DELAY = 2.0
     
     def __init__(self, api_key: Optional[str] = None, llm_client: Optional[LLMClient] = None):
-        self.api_key = api_key or Config.ZEP_API_KEY
-        if not self.api_key:
+        self.api_key = api_key or ("__local__" if Config.GRAPH_BACKEND == "local_primary" else Config.ZEP_API_KEY)
+        if Config.GRAPH_BACKEND != "local_primary" and not self.api_key:
             raise ValueError("ZEP_API_KEY 설정")
         
         self.client = Zep(api_key=self.api_key)
+        self.shadow_eval = ShadowEvalCollector(
+            graph_backend=Config.GRAPH_BACKEND,
+            enabled=Config.ENGINE_SHADOW_EVAL_ENABLED,
+        )
         # LLMInsightForge생성질문
         self._llm_client = llm_client
         logger.info("ZepToolsService 완료")
@@ -449,6 +460,9 @@ class ZepToolsService:
                 return func()
             except Exception as e:
                 last_exception = e
+                if not self._is_retryable_error(e):
+                    logger.error(f"Zep {operation_name} 영구 실패: {str(e)}")
+                    raise
                 if attempt < max_retries - 1:
                     logger.warning(
                         f"Zep {operation_name}  {attempt + 1}회실패: {str(e)[:100]}, "
@@ -460,6 +474,34 @@ class ZepToolsService:
                     logger.error(f"Zep {operation_name}  {max_retries}회실패: {str(e)}")
         
         raise last_exception
+
+    def _extract_status_code(self, error: Exception) -> Optional[int]:
+        status_code = getattr(error, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+        response = getattr(error, "response", None)
+        response_status = getattr(response, "status_code", None)
+        if isinstance(response_status, int):
+            return response_status
+        return None
+
+    def _is_retryable_error(self, error: Exception) -> bool:
+        if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+            return True
+
+        status_code = self._extract_status_code(error)
+        if status_code is None:
+            return True
+        if status_code == 429:
+            return True
+        if status_code >= 500:
+            return True
+        return False
+
+    def _should_fallback_to_local_search(self, error: Exception) -> bool:
+        if Config.GRAPH_BACKEND == "local_primary":
+            return True
+        return self._is_retryable_error(error)
     
     def search_graph(
         self, 
@@ -529,19 +571,21 @@ class ZepToolsService:
                         facts.append(f"[{node.name}]: {node.summary}")
             
             logger.info(f"검색완료:  {len(facts)}건사실")
-            
-            return SearchResult(
+            result = SearchResult(
                 facts=facts,
                 edges=edges,
                 nodes=nodes,
                 query=query,
                 total_count=len(facts)
             )
+            self.shadow_eval.capture_search(graph_id, query, limit, scope, result.to_dict())
+            return result
             
         except Exception as e:
             logger.warning(f"Zep Search API실패, 검색: {str(e)}")
-            # :핵심검색
-            return self._local_search(graph_id, query, limit, scope)
+            if self._should_fallback_to_local_search(e):
+                return self._local_search(graph_id, query, limit, scope)
+            raise
     
     def _local_search(
         self, 

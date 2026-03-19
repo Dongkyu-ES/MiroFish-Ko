@@ -9,15 +9,23 @@ import warnings
 # 다른 import보다 먼저 설정해야 함
 warnings.filterwarnings("ignore", message=".*resource_tracker.*")
 
-from flask import Flask, request
-from flask_cors import CORS
 
-from .config import Config
-from .utils.logger import setup_logger, get_logger
-
-
-def create_app(config_class=Config):
+def create_app(config_class=None):
     """Flask 애플리케이션 팩토리 함수"""
+    from flask import Flask, request
+    from flask_cors import CORS
+
+    if os.environ.get("GRAPH_BACKEND") == "local_primary":
+        from backend.bootstrap_graph_backend import bootstrap_graph_backend
+
+        bootstrap_graph_backend()
+
+    from .config import Config
+    from .utils.logger import get_logger, setup_logger
+
+    if config_class is None:
+        config_class = Config
+
     app = Flask(__name__)
     app.config.from_object(config_class)
     

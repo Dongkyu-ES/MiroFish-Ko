@@ -43,6 +43,9 @@ class Project:
     # 그래프 정보(2번 API 완료 후 채워짐)
     graph_id: Optional[str] = None
     graph_build_task_id: Optional[str] = None
+    migration_status: Optional[str] = None
+    migration_error: Optional[str] = None
+    local_primary_eligible: bool = False
     
     # 설정
     simulation_requirement: Optional[str] = None
@@ -66,6 +69,9 @@ class Project:
             "analysis_summary": self.analysis_summary,
             "graph_id": self.graph_id,
             "graph_build_task_id": self.graph_build_task_id,
+            "migration_status": self.migration_status,
+            "migration_error": self.migration_error,
+            "local_primary_eligible": self.local_primary_eligible,
             "simulation_requirement": self.simulation_requirement,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
@@ -91,6 +97,9 @@ class Project:
             analysis_summary=data.get('analysis_summary'),
             graph_id=data.get('graph_id'),
             graph_build_task_id=data.get('graph_build_task_id'),
+            migration_status=data.get('migration_status'),
+            migration_error=data.get('migration_error'),
+            local_primary_eligible=data.get('local_primary_eligible', False),
             simulation_requirement=data.get('simulation_requirement'),
             chunk_size=data.get('chunk_size', 500),
             chunk_overlap=data.get('chunk_overlap', 50),

@@ -12,6 +12,7 @@ dependencies = [
     # 핵심 프레임워크
     "flask>=3.0.0",
     "flask-cors>=6.0.0",
+    "httpx>=0.27.0",
     
     # LLM 관련
     "openai>=1.0.0",

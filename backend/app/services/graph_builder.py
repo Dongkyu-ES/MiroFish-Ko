@@ -10,11 +10,19 @@ import threading
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 
+from ..config import Config
+
+if Config.GRAPH_BACKEND == "local_primary":
+    from backend.bootstrap_graph_backend import bootstrap_graph_backend
+
+    bootstrap_graph_backend()
+
 from zep_cloud.client import Zep
 from zep_cloud import EpisodeData, EntityEdgeSourceTarget
 
-from ..config import Config
 from ..models.task import TaskManager, TaskStatus
+from ..parity_engine.runtime_checks import EngineUnavailableError, ensure_engine_ready
+from ..parity_engine.shadow_eval import ShadowEvalCollector
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 from .text_processor import TextProcessor
 
@@ -43,12 +51,48 @@ class GraphBuilderService:
     """
     
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or Config.ZEP_API_KEY
-        if not self.api_key:
+        self.api_key = api_key or ("__local__" if Config.GRAPH_BACKEND == "local_primary" else Config.ZEP_API_KEY)
+        if Config.GRAPH_BACKEND != "local_primary" and not self.api_key:
             raise ValueError("ZEP_API_KEY가 설정되지 않았습니다")
         
         self.client = Zep(api_key=self.api_key)
+        self.shadow_eval = ShadowEvalCollector(
+            graph_backend=Config.GRAPH_BACKEND,
+            enabled=Config.ENGINE_SHADOW_EVAL_ENABLED,
+        )
         self.task_manager = TaskManager()
+
+    @staticmethod
+    def resolve_chunk_settings(chunk_size: int, chunk_overlap: int) -> tuple[int, int]:
+        graph_backend = os.environ.get("GRAPH_BACKEND", Config.GRAPH_BACKEND)
+        if graph_backend == "local_primary":
+            return max(chunk_size, 1500), max(chunk_overlap, 100)
+        return chunk_size, chunk_overlap
+
+    @staticmethod
+    def _extract_status_code(error: Exception) -> Optional[int]:
+        status_code = getattr(error, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+        response = getattr(error, "response", None)
+        response_status = getattr(response, "status_code", None)
+        if isinstance(response_status, int):
+            return response_status
+        return None
+
+    @classmethod
+    def _is_retryable_poll_error(cls, error: Exception) -> bool:
+        if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+            return True
+
+        status_code = cls._extract_status_code(error)
+        if status_code is None:
+            return True
+        if status_code == 429:
+            return True
+        if status_code >= 500:
+            return True
+        return False
     
     def build_graph_async(
         self,
@@ -73,6 +117,7 @@ class GraphBuilderService:
         Returns:
             작업 ID
         """
+        chunk_size, chunk_overlap = self.resolve_chunk_settings(chunk_size, chunk_overlap)
         # 작업 생성
         task_id = self.task_manager.create_task(
             task_type="graph_build",
@@ -111,6 +156,14 @@ class GraphBuilderService:
                 progress=5,
                 message="그래프 구축을 시작합니다..."
             )
+
+            if Config.GRAPH_BACKEND == "local_primary":
+                self.task_manager.update_task(
+                    task_id,
+                    progress=7,
+                    message="Parity engine 준비 상태 확인 중..."
+                )
+                ensure_engine_ready(timeout_seconds=Config.ENGINE_TIMEOUT_SECONDS)
             
             # 1. 그래프 생성
             graph_id = self.create_graph(graph_name)
@@ -179,6 +232,8 @@ class GraphBuilderService:
                 "chunks_processed": total_chunks,
             })
             
+        except EngineUnavailableError as e:
+            self.task_manager.fail_task(task_id, str(e))
         except Exception as e:
             import traceback
             error_msg = f"{str(e)}\n{traceback.format_exc()}"
@@ -192,6 +247,11 @@ class GraphBuilderService:
             graph_id=graph_id,
             name=name,
             description="MiroFish Social Simulation Graph"
+        )
+        self.shadow_eval.ensure_graph(
+            graph_id=graph_id,
+            name=name,
+            description="MiroFish Social Simulation Graph",
         )
         
         return graph_id
@@ -284,6 +344,7 @@ class GraphBuilderService:
                 entities=entity_types if entity_types else None,
                 edges=edge_definitions if edge_definitions else None,
             )
+            self.shadow_eval.set_ontology(graph_id, ontology)
     
     def add_text_batches(
         self,
@@ -320,6 +381,7 @@ class GraphBuilderService:
                     graph_id=graph_id,
                     episodes=episodes
                 )
+                self.shadow_eval.add_text_batch(graph_id, batch_chunks)
                 
                 # 반환된 episode uuid 수집
                 if batch_result and isinstance(batch_result, list):
@@ -342,7 +404,7 @@ class GraphBuilderService:
         self,
         episode_uuids: List[str],
         progress_callback: Optional[Callable] = None,
-        timeout: int = 600
+        timeout: int = 7200
     ):
         """모든 episode 처리 완료를 기다린다(각 episode의 processed 상태 조회)."""
         if not episode_uuids:
@@ -357,15 +419,35 @@ class GraphBuilderService:
         
         if progress_callback:
             progress_callback(f"{total_episodes}개 텍스트 청크 처리 대기 시작...", 0)
+
+        def _mark_completed(ep_uuid: str):
+            nonlocal completed_count
+            pending_episodes.remove(ep_uuid)
+            completed_count += 1
+
+        def _task_error_message(task: Any) -> str:
+            error = getattr(task, "error", None)
+            if not error:
+                return "Zep episode task failed"
+            return getattr(error, "message", None) or str(error)
+
+        def _episode_error_message(episode: Any) -> str:
+            error = getattr(episode, "error", None)
+            if not error:
+                return "Zep episode failed"
+            return getattr(error, "message", None) or str(error)
         
         while pending_episodes:
             if time.time() - start_time > timeout:
+                pending_preview = ", ".join(sorted(pending_episodes)[:5])
+                message = (
+                    f"Timed out while waiting for Zep episodes: "
+                    f"{completed_count}/{total_episodes} completed; "
+                    f"pending={pending_preview}"
+                )
                 if progress_callback:
-                    progress_callback(
-                        f"일부 텍스트 청크가 시간 초과되었습니다. 완료 {completed_count}/{total_episodes}",
-                        completed_count / total_episodes
-                    )
-                break
+                    progress_callback(message, completed_count / total_episodes)
+                raise TimeoutError(message)
             
             # 각 episode 처리 상태 확인
             for ep_uuid in list(pending_episodes):
@@ -374,12 +456,26 @@ class GraphBuilderService:
                     is_processed = getattr(episode, 'processed', False)
                     
                     if is_processed:
-                        pending_episodes.remove(ep_uuid)
-                        completed_count += 1
-                        
+                        _mark_completed(ep_uuid)
+                        continue
+
+                    episode_status = (getattr(episode, "status", "") or "").lower()
+                    if episode_status in {"failed", "error", "cancelled", "canceled"}:
+                        raise RuntimeError(_episode_error_message(episode))
+
+                    task_id = getattr(episode, "task_id", None)
+                    if task_id and hasattr(self.client, "task") and hasattr(self.client.task, "get"):
+                        task = self.client.task.get(task_id)
+                        status = (getattr(task, "status", "") or "").lower()
+                        if status in {"completed", "succeeded", "success", "done"}:
+                            _mark_completed(ep_uuid)
+                        elif status in {"failed", "error", "cancelled", "canceled"}:
+                            raise RuntimeError(_task_error_message(task))
                 except Exception as e:
-                    # 단건 조회 오류는 무시하고 계속 진행
-                    pass
+                    if isinstance(e, RuntimeError):
+                        raise
+                    if not self._is_retryable_poll_error(e):
+                        raise
             
             elapsed = int(time.time() - start_time)
             if progress_callback:

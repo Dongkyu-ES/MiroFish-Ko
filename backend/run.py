@@ -16,10 +16,17 @@ if sys.platform == 'win32':
         sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # 프로젝트 루트 경로 추가
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-from app import create_app
-from app.config import Config
+from backend.bootstrap_graph_backend import bootstrap_graph_backend
+
+bootstrap_graph_backend()
+
+from backend.app import create_app
+from backend.app.config import Config
+from backend.app.parity_engine.runtime_checks import EngineUnavailableError, ensure_engine_ready
 
 
 def main():
@@ -32,6 +39,13 @@ def main():
             print(f"  - {err}")
         print("\n.env 파일 설정을 확인해 주세요.")
         sys.exit(1)
+
+    if Config.GRAPH_BACKEND == "local_primary":
+        try:
+            ensure_engine_ready(timeout_seconds=Config.ENGINE_TIMEOUT_SECONDS)
+        except EngineUnavailableError as exc:
+            print(f"Parity engine startup check failed: {exc}")
+            sys.exit(1)
     
     # 앱 생성
     app = create_app()

@@ -12,9 +12,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from queue import Queue, Empty
 
+from ..config import Config
+
+if Config.GRAPH_BACKEND == "local_primary":
+    from backend.bootstrap_graph_backend import bootstrap_graph_backend
+
+    bootstrap_graph_backend()
+
 from zep_cloud.client import Zep
 
-from ..config import Config
 from ..utils.logger import get_logger
 
 logger = get_logger('mirofish.zep_graph_memory_updater')
@@ -209,6 +215,10 @@ class ZepGraphMemoryUpdater:
     
     # 플랫폼별 배치 크기
     BATCH_SIZE = 5
+
+    # 큐 폴링 주기와 partial batch flush 기준
+    QUEUE_POLL_INTERVAL = 0.2
+    FLUSH_INTERVAL = 2.0
     
     # 플랫폼(콘솔)
     PLATFORM_DISPLAY_NAMES = {
@@ -222,6 +232,8 @@ class ZepGraphMemoryUpdater:
     # 설정
     MAX_RETRIES = 3
     RETRY_DELAY = 2  #초
+    EPISODE_WAIT_TIMEOUT = 30.0
+    EPISODE_POLL_INTERVAL = 0.5
     
     def __init__(self, graph_id: str, api_key: Optional[str] = None):
         """
@@ -232,9 +244,9 @@ class ZepGraphMemoryUpdater:
             api_key: Zep API Key(선택, 설정읽기)
         """
         self.graph_id = graph_id
-        self.api_key = api_key or Config.ZEP_API_KEY
+        self.api_key = api_key or ("__local__" if Config.GRAPH_BACKEND == "local_primary" else Config.ZEP_API_KEY)
         
-        if not self.api_key:
+        if Config.GRAPH_BACKEND != "local_primary" and not self.api_key:
             raise ValueError("ZEP_API_KEY설정")
         
         self.client = Zep(api_key=self.api_key)
@@ -246,6 +258,10 @@ class ZepGraphMemoryUpdater:
         self._platform_buffers: Dict[str, List[AgentActivity]] = {
             'twitter': [],
             'reddit': [],
+        }
+        self._platform_last_activity_at: Dict[str, Optional[float]] = {
+            'twitter': None,
+            'reddit': None,
         }
         self._buffer_lock = threading.Lock()
         
@@ -357,30 +373,62 @@ class ZepGraphMemoryUpdater:
             try:
                 # (1)
                 try:
-                    activity = self._activity_queue.get(timeout=1)
+                    activity = self._activity_queue.get(timeout=self.QUEUE_POLL_INTERVAL)
                     
                     # 플랫폼
                     platform = activity.platform.lower()
                     with self._buffer_lock:
                         if platform not in self._platform_buffers:
                             self._platform_buffers[platform] = []
+                            self._platform_last_activity_at[platform] = None
                         self._platform_buffers[platform].append(activity)
+                        self._platform_last_activity_at[platform] = time.time()
                         
                         # 플랫폼
                         if len(self._platform_buffers[platform]) >= self.BATCH_SIZE:
                             batch = self._platform_buffers[platform][:self.BATCH_SIZE]
                             self._platform_buffers[platform] = self._platform_buffers[platform][self.BATCH_SIZE:]
+                            if self._platform_buffers[platform]:
+                                self._platform_last_activity_at[platform] = time.time()
+                            else:
+                                self._platform_last_activity_at[platform] = None
                             # 
                             self._send_batch_activities(batch, platform)
                             # , 요청
                             time.sleep(self.SEND_INTERVAL)
                     
                 except Empty:
-                    pass
+                    self._flush_stale_buffers()
+                    continue
+
+                self._flush_stale_buffers()
                     
             except Exception as e:
                 logger.error(f": {e}")
                 time.sleep(1)
+
+    def _flush_stale_buffers(self):
+        """배치 크기에 못 미치는 활동도 idle 상태가 길어지면 전송한다."""
+        now = time.time()
+        stale_batches: List[tuple[str, List[AgentActivity]]] = []
+
+        with self._buffer_lock:
+            for platform, buffer in self._platform_buffers.items():
+                last_activity_at = self._platform_last_activity_at.get(platform)
+                if not buffer or last_activity_at is None:
+                    continue
+                if now - last_activity_at < self.FLUSH_INTERVAL:
+                    continue
+
+                stale_batches.append((platform, list(buffer)))
+                self._platform_buffers[platform] = []
+                self._platform_last_activity_at[platform] = None
+
+        for platform, batch in stale_batches:
+            display_name = self._get_platform_display_name(platform)
+            logger.info(f"{display_name}플랫폼 partial batch {len(batch)}건 idle flush")
+            self._send_batch_activities(batch, platform)
+            time.sleep(self.SEND_INTERVAL)
     
     def _send_batch_activities(self, activities: List[AgentActivity], platform: str):
         """
@@ -396,23 +444,16 @@ class ZepGraphMemoryUpdater:
         # , 
         episode_texts = [activity.to_episode_text() for activity in activities]
         combined_text = "\n".join(episode_texts)
-        
-        # 
+
+        episode = None
         for attempt in range(self.MAX_RETRIES):
             try:
-                self.client.graph.add(
+                episode = self.client.graph.add(
                     graph_id=self.graph_id,
                     type="text",
                     data=combined_text
                 )
-                
-                self._total_sent += 1
-                self._total_items_sent += len(activities)
-                display_name = self._get_platform_display_name(platform)
-                logger.info(f" {len(activities)}건{display_name}그래프 {self.graph_id}")
-                logger.debug(f": {combined_text[:200]}...")
-                return
-                
+                break
             except Exception as e:
                 if attempt < self.MAX_RETRIES - 1:
                     logger.warning(f"Zep실패 ( {attempt + 1}/{self.MAX_RETRIES}): {e}")
@@ -420,6 +461,93 @@ class ZepGraphMemoryUpdater:
                 else:
                     logger.error(f"Zep실패, {self.MAX_RETRIES}: {e}")
                     self._failed_count += 1
+                    return
+
+        try:
+            self._wait_for_episode_processing(episode)
+        except Exception as e:
+            logger.error(f"Zep episode 처리 대기 실패: {e}")
+            self._failed_count += 1
+            return
+
+        self._total_sent += 1
+        self._total_items_sent += len(activities)
+        display_name = self._get_platform_display_name(platform)
+        logger.info(f" {len(activities)}건{display_name}그래프 {self.graph_id}")
+        logger.debug(f": {combined_text[:200]}...")
+
+    @staticmethod
+    def _extract_status_code(error: Exception) -> Optional[int]:
+        status_code = getattr(error, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+        response = getattr(error, "response", None)
+        response_status = getattr(response, "status_code", None)
+        if isinstance(response_status, int):
+            return response_status
+        return None
+
+    @classmethod
+    def _is_retryable_poll_error(cls, error: Exception) -> bool:
+        if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+            return True
+
+        status_code = cls._extract_status_code(error)
+        if status_code is None:
+            return True
+        if status_code == 429:
+            return True
+        if status_code >= 500:
+            return True
+        return False
+
+    def _wait_for_episode_processing(self, episode: Any):
+        """graph.add()가 비동기 episode를 반환한 경우 실제 처리 완료까지 기다린다."""
+        if not episode:
+            return
+
+        if getattr(episode, "processed", False):
+            return
+
+        episode_uuid = (
+            getattr(episode, "uuid_", None)
+            or getattr(episode, "uuid", None)
+            or getattr(episode, "episode_uuid", None)
+        )
+        task_id = getattr(episode, "task_id", None)
+
+        if not episode_uuid and not task_id:
+            return
+
+        deadline = time.time() + self.EPISODE_WAIT_TIMEOUT
+        while time.time() < deadline:
+            try:
+                current_episode = None
+                if episode_uuid and hasattr(self.client.graph, "episode"):
+                    current_episode = self.client.graph.episode.get(uuid_=episode_uuid)
+                    if getattr(current_episode, "processed", False):
+                        return
+                    task_id = task_id or getattr(current_episode, "task_id", None)
+
+                if task_id and hasattr(self.client, "task") and hasattr(self.client.task, "get"):
+                    task = self.client.task.get(task_id)
+                    status = (getattr(task, "status", "") or "").lower()
+                    if status in {"completed", "succeeded", "success", "done"}:
+                        return
+                    if status in {"failed", "error", "cancelled", "canceled"}:
+                        error = getattr(task, "error", None)
+                        detail = getattr(error, "message", None) or str(error) if error else "unknown task failure"
+                        raise RuntimeError(f"episode task failed: {detail}")
+            except Exception as e:
+                if isinstance(e, RuntimeError):
+                    raise
+                if not self._is_retryable_poll_error(e):
+                    raise
+
+            time.sleep(self.EPISODE_POLL_INTERVAL)
+
+        pending_ref = task_id or episode_uuid or "unknown"
+        raise TimeoutError(f"episode processing timed out: {pending_ref}")
     
     def _flush_remaining(self):
         """진행 중"""
@@ -431,6 +559,7 @@ class ZepGraphMemoryUpdater:
                 with self._buffer_lock:
                     if platform not in self._platform_buffers:
                         self._platform_buffers[platform] = []
+                        self._platform_last_activity_at[platform] = None
                     self._platform_buffers[platform].append(activity)
             except Empty:
                 break
@@ -445,6 +574,7 @@ class ZepGraphMemoryUpdater:
             # 
             for platform in self._platform_buffers:
                 self._platform_buffers[platform] = []
+                self._platform_last_activity_at[platform] = None
     
     def get_stats(self) -> Dict[str, Any]:
         """정보"""

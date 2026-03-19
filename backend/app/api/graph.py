@@ -17,9 +17,21 @@ from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
 from ..models.task import TaskManager, TaskStatus
 from ..models.project import ProjectManager, ProjectStatus
+from ..parity_engine.migration import (
+    ProjectMigrationService,
+    RuntimeProjectGraphImporter,
+    RuntimeProjectGraphVerifier,
+)
 
 # 로거
 logger = get_logger('mirofish.api')
+
+
+def build_project_migration_service() -> ProjectMigrationService:
+    return ProjectMigrationService(
+        importer=RuntimeProjectGraphImporter(),
+        verifier=RuntimeProjectGraphVerifier(),
+    )
 
 
 def allowed_file(filename: str) -> bool:
@@ -106,6 +118,44 @@ def reset_project(project_id: str):
         "message": f"프로젝트 초기화 완료: {project_id}",
         "data": project.to_dict()
     })
+
+
+@graph_bp.route('/project/<project_id>/migrate-local-primary', methods=['POST'])
+def migrate_project_to_local_primary(project_id: str):
+    try:
+        service = build_project_migration_service()
+        result = service.migrate_project(project_id)
+        project = ProjectManager.get_project(project_id)
+        if project:
+            project.migration_status = "completed"
+            project.migration_error = None
+            project.local_primary_eligible = True
+            ProjectManager.save_project(project)
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        project = ProjectManager.get_project(project_id)
+        if project:
+            project.migration_status = "rolled_back"
+            project.migration_error = str(e)
+            project.local_primary_eligible = False
+            ProjectManager.save_project(project)
+        return jsonify(
+            {
+                "success": False,
+                "error": "Graph migration failed and was rolled back",
+                "migration_status": "rolled_back",
+                "details": str(e),
+            }
+        ), 500
+
+
+@graph_bp.route('/project/<project_id>/migration-status', methods=['GET'])
+def get_project_migration_status(project_id: str):
+    try:
+        service = build_project_migration_service()
+        return jsonify({"success": True, "data": service.get_migration_status(project_id)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 404
 
 
 # ============== API 1: 파일 업로드 및 온톨로지 생성 ==============
@@ -276,7 +326,7 @@ def build_graph():
         
         # 설정 확인
         errors = []
-        if not Config.ZEP_API_KEY:
+        if Config.requires_zep_api_key() and not Config.ZEP_API_KEY:
             errors.append("ZEP_API_KEY가 설정되지 않았습니다")
         if errors:
             logger.error(f"설정 오류: {errors}")
@@ -331,6 +381,7 @@ def build_graph():
         graph_name = data.get('graph_name', project.name or 'MiroFish Graph')
         chunk_size = data.get('chunk_size', project.chunk_size or Config.DEFAULT_CHUNK_SIZE)
         chunk_overlap = data.get('chunk_overlap', project.chunk_overlap or Config.DEFAULT_CHUNK_OVERLAP)
+        chunk_size, chunk_overlap = GraphBuilderService.resolve_chunk_settings(chunk_size, chunk_overlap)
         
         # 프로젝트 설정 갱신
         project.chunk_size = chunk_size
@@ -542,7 +593,7 @@ def list_tasks():
     
     return jsonify({
         "success": True,
-        "data": [t.to_dict() for t in tasks],
+        "data": tasks,
         "count": len(tasks)
     })
 
@@ -553,7 +604,7 @@ def list_tasks():
 def get_graph_data(graph_id: str):
     """그래프 데이터(노드/엣지)를 조회한다."""
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.requires_zep_api_key() and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY가 설정되지 않았습니다"
@@ -579,7 +630,7 @@ def get_graph_data(graph_id: str):
 def delete_graph(graph_id: str):
     """Zep 그래프를 삭제한다."""
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.requires_zep_api_key() and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY가 설정되지 않았습니다"

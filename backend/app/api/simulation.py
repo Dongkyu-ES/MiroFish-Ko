@@ -12,7 +12,12 @@ from ..config import Config
 from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
-from ..services.simulation_runner import SimulationRunner, RunnerStatus
+from ..services.simulation_runner import (
+    SimulationRunner,
+    RunnerStatus,
+    SimulationRuntimeUnavailableError,
+    SimulationStartupError,
+)
 from ..utils.logger import get_logger
 from ..models.project import ProjectManager
 
@@ -56,7 +61,7 @@ def get_graph_entities(graph_id: str):
         enrich: 엣지정보(true)
     """
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.requires_zep_api_key() and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY설정"
@@ -93,7 +98,7 @@ def get_graph_entities(graph_id: str):
 def get_entity_detail(graph_id: str, entity_uuid: str):
     """엔터티상세정보"""
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.requires_zep_api_key() and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY설정"
@@ -126,7 +131,7 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
 def get_entities_by_type(graph_id: str, entity_type: str):
     """타입엔터티"""
     try:
-        if not Config.ZEP_API_KEY:
+        if Config.requires_zep_api_key() and not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
                 "error": "ZEP_API_KEY설정"
@@ -1409,10 +1414,11 @@ def generate_profiles():
                 "error": "찾지 못함엔터티"
             }), 400
         
-        generator = OasisProfileGenerator()
+        generator = OasisProfileGenerator(graph_id=graph_id)
         profiles = generator.generate_profiles_from_entities(
             entities=filtered.entities,
-            use_llm=use_llm
+            use_llm=use_llm,
+            graph_id=graph_id,
         )
         
         if platform == "reddit":
@@ -1627,6 +1633,14 @@ def start_simulation():
             "error": str(e)
         }), 400
         
+    except (SimulationRuntimeUnavailableError, SimulationStartupError) as e:
+        logger.error(f"시작시뮬레이션실패: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "error_code": "simulation_runtime_unavailable"
+        }), 503
+
     except Exception as e:
         logger.error(f"시작시뮬레이션실패: {str(e)}")
         return jsonify({

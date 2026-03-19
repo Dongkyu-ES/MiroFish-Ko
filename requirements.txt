@@ -1,0 +1,22 @@
+# Canonical install entrypoint for the Graphiti-backed parity engine work.
+# Operators should install only this file.
+
+# Backend dependencies needed for parity-engine work
+flask>=3.0.0
+flask-cors>=6.0.0
+openai>=1.0.0
+zep-cloud==3.13.0
+camel-oasis==0.2.5; python_version < "3.12"
+camel-ai==0.2.78
+PyMuPDF>=1.24.0
+charset-normalizer>=3.0.0
+chardet>=5.0.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# Graphiti core + embedded Kuzu backend (official install path from Graphiti docs)
+graphiti-core[kuzu]==0.28.2
+
+# Test dependencies used by parity-engine and integration verification
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

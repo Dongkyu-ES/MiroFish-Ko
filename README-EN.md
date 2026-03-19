@@ -162,6 +162,40 @@ npm run backend   # Start backend only
 npm run frontend  # Start frontend only
 ```
 
+### Local Graph Engine
+
+Standalone parity engine:
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Default runtime contract:
+
+- backend: `5001`
+- engine: `8123`
+- `GRAPH_BACKEND=zep`
+- `GRAPH_BACKEND=shadow_eval`
+- `GRAPH_BACKEND=local_primary`
+- `ENGINE_BASE_URL=http://127.0.0.1:8123`
+- `ENGINE_HOST=127.0.0.1`
+- `ENGINE_PORT=8123`
+- `ENGINE_TIMEOUT_SECONDS=30`
+- `ENGINE_SHARED_TOKEN` (falls back to `SECRET_KEY` if unset)
+- `SECRET_KEY` must be set for backend and engine auth
+- `GRAPHITI_BACKEND=kuzu`
+- `GRAPHITI_DB_PATH=./data/graphiti.kuzu`
+- `GRAPHITI_PARITY_ARTIFACT_DIR=./artifacts/parity`
+- `GRAPHITI_LLM_*`, `GRAPHITI_EMBEDDING_*`, `GRAPHITI_RERANK_*`
+- `GRAPHITI_DEFAULT_LANGUAGES=ko,en`
+- `GRAPHITI_STDOUT_LOGGING=true`
+- first-class providers: OpenAI, OpenRouter, Ollama, LM Studio
+- cutover to `local_primary` requires parity scorecards and compatibility gates to pass
+- `ZEP_API_KEY` remains required for `zep` and `shadow_eval`, but not for `local_primary`
+- authoritative parity evidence must come from `run_local_candidate_capture.py --mode provider`
+- `inline` candidate capture is debug-only and must not be used for cutover approval
+
 ### Option 2: Docker Deployment
 
 ```bash

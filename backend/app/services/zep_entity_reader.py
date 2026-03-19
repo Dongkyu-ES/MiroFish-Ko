@@ -7,9 +7,15 @@ import time
 from typing import Dict, Any, List, Optional, Set, Callable, TypeVar
 from dataclasses import dataclass, field
 
+from ..config import Config
+
+if Config.GRAPH_BACKEND == "local_primary":
+    from backend.bootstrap_graph_backend import bootstrap_graph_backend
+
+    bootstrap_graph_backend()
+
 from zep_cloud.client import Zep
 
-from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 
@@ -79,8 +85,8 @@ class ZepEntityReader:
     """
     
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or Config.ZEP_API_KEY
-        if not self.api_key:
+        self.api_key = api_key or ("__local__" if Config.GRAPH_BACKEND == "local_primary" else Config.ZEP_API_KEY)
+        if Config.GRAPH_BACKEND != "local_primary" and not self.api_key:
             raise ValueError("ZEP_API_KEY가 설정되지 않았습니다")
         
         self.client = Zep(api_key=self.api_key)
@@ -190,9 +196,14 @@ class ZepEntityReader:
             엣지 목록
         """
         try:
+            node_client = self.client.graph.node
+            get_edges = getattr(node_client, "get_edges", None)
+            if get_edges is None:
+                get_edges = getattr(node_client, "get_entity_edges")
+
             # 재시도 래퍼로 Zep API 호출
             edges = self._call_with_retry(
-                func=lambda: self.client.graph.node.get_entity_edges(node_uuid=node_uuid),
+                func=lambda: get_edges(node_uuid=node_uuid),
                 operation_name=f"노드 엣지 조회(node={node_uuid[:8]}...)"
             )
             
@@ -435,4 +446,3 @@ class ZepEntityReader:
             enrich_with_edges=enrich_with_edges
         )
         return result.entities
-

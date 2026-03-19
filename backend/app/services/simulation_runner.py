@@ -44,6 +44,14 @@ class RunnerStatus(str, Enum):
     FAILED = "failed"
 
 
+class SimulationRuntimeUnavailableError(RuntimeError):
+    """Raised when no healthy simulation runtime interpreter is available."""
+
+
+class SimulationStartupError(RuntimeError):
+    """Raised when the simulation child process exits immediately after launch."""
+
+
 @dataclass
 class AgentAction:
     """Agent"""
@@ -214,6 +222,14 @@ class SimulationRunner:
         os.path.dirname(__file__),
         '../../scripts'
     )
+
+    DEFAULT_FALLBACK_PYTHONS = [
+        os.path.expanduser("~/miniconda3/envs/kggen/bin/python"),
+        os.path.expanduser("~/miniconda3/envs/workspace/bin/python"),
+    ]
+    REQUIRED_IMPORTS = ("sqlite3", "camel", "oasis")
+    STARTUP_CHECK_SECONDS = 1.0
+    STARTUP_POLL_INTERVAL_SECONDS = 0.1
     
     # 진행 중상태
     _run_states: Dict[str, SimulationRunState] = {}
@@ -225,7 +241,75 @@ class SimulationRunner:
     
     # 그래프설정
     _graph_memory_enabled: Dict[str, bool] = {}  # simulation_id -> enabled
-    
+
+    @classmethod
+    def _candidate_python_executables(cls) -> List[str]:
+        candidates: List[str] = []
+        override = os.environ.get("SIMULATION_PYTHON_EXECUTABLE", "").strip()
+        if override:
+            candidates.append(override)
+        candidates.append(sys.executable)
+        candidates.extend(cls.DEFAULT_FALLBACK_PYTHONS)
+
+        unique_candidates: List[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = os.path.abspath(candidate)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_candidates.append(normalized)
+        return unique_candidates
+
+    @classmethod
+    def _python_supports_runtime_dependencies(cls, python_executable: str) -> bool:
+        if not os.path.exists(python_executable):
+            return False
+        try:
+            result = subprocess.run(
+                [python_executable, "-c", "; ".join(f"import {name}" for name in cls.REQUIRED_IMPORTS)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+    @classmethod
+    def _resolve_python_executable(cls) -> str:
+        for candidate in cls._candidate_python_executables():
+            if cls._python_supports_runtime_dependencies(candidate):
+                return candidate
+        requirements = ", ".join(cls.REQUIRED_IMPORTS)
+        raise SimulationRuntimeUnavailableError(
+            f"필수 런타임 모듈({requirements})을 import할 수 있는 Python 인터프리터를 찾지 못했습니다"
+        )
+
+    @classmethod
+    def _read_log_tail(cls, log_path: str, limit: int = 2000) -> str:
+        try:
+            if not os.path.exists(log_path):
+                return ""
+            with open(log_path, 'r', encoding='utf-8') as f:
+                return f.read()[-limit:]
+        except Exception:
+            return ""
+
+    @classmethod
+    def _verify_process_started(cls, process: subprocess.Popen, log_path: str) -> None:
+        deadline = time.time() + cls.STARTUP_CHECK_SECONDS
+        while time.time() < deadline:
+            exit_code = process.poll()
+            if exit_code is None:
+                time.sleep(cls.STARTUP_POLL_INTERVAL_SECONDS)
+                continue
+            error_info = cls._read_log_tail(log_path)
+            raise SimulationStartupError(
+                f"시뮬레이션 엔진이 시작 직후 종료되었습니다 (exit={exit_code}). {error_info}".strip()
+            )
+
     @classmethod
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
         """실행상태"""
@@ -406,6 +490,7 @@ class SimulationRunner:
         
         # 시작시뮬레이션
         try:
+            python_executable = cls._resolve_python_executable()
             # 실행, 
             # 로그:
             #   twitter/actions.jsonl - Twitter 로그
@@ -413,7 +498,7 @@ class SimulationRunner:
             #   simulation.log        - 로그
             
             cmd = [
-                sys.executable,  # Python
+                python_executable,
                 script_path,
                 "--config", config_path,  # 설정 파일
             ]
@@ -445,6 +530,8 @@ class SimulationRunner:
                 env=env,  #  UTF-8 
                 start_new_session=True,  # , 
             )
+            main_log_file.flush()
+            cls._verify_process_started(process, main_log_path)
             
             # 저장파일
             cls._stdout_files[simulation_id] = main_log_file
@@ -465,6 +552,7 @@ class SimulationRunner:
             cls._monitor_threads[simulation_id] = monitor_thread
             
             logger.info(f"시뮬레이션시작: {simulation_id}, pid={process.pid}, platform={platform}")
+            logger.info(f"시뮬레이션 Python 인터프리터: {python_executable}")
             
         except Exception as e:
             state.runner_status = RunnerStatus.FAILED

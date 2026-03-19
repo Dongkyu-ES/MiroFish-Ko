@@ -1,0 +1,107 @@
+{
+  "version": "v1",
+  "cases": [
+    {
+      "id": "ko_alias_case",
+      "language": "ko",
+      "purpose": "alias-heavy entity normalization",
+      "description": "한국어 인물/조직 alias merge와 identity stability를 평가한다.",
+      "documents": [
+        "documents/ko_alias_case.md"
+      ],
+      "ontology_mode": "generate",
+      "simulation_requirement": "한국어 별칭이 많은 인물과 조직 관계를 추론하고 변화에 반응하라.",
+      "queries": [
+        "민수의 실제 소속 조직은 어디인가?",
+        "별칭이 같은 인물/조직 관계를 요약해라."
+      ],
+      "expected_outputs": [
+        "graph",
+        "search",
+        "profile"
+      ]
+    },
+    {
+      "id": "en_temporal_case",
+      "language": "en",
+      "purpose": "temporal relationship and fact lifecycle",
+      "description": "Temporal facts, replacement behavior, and validity timestamps.",
+      "documents": [
+        "documents/en_temporal_case.md"
+      ],
+      "ontology_mode": "generate",
+      "simulation_requirement": "Track leadership changes over time and explain which facts remain valid.",
+      "queries": [
+        "Who currently leads Northwind Labs?",
+        "Which employment relationship expired?"
+      ],
+      "expected_outputs": [
+        "graph",
+        "search",
+        "memory_update"
+      ]
+    },
+    {
+      "id": "ko_report_case",
+      "language": "ko",
+      "purpose": "report generation and tool usefulness",
+      "description": "한국어 report tool outputs와 section generation parity를 평가한다.",
+      "documents": [
+        "documents/ko_report_case.md"
+      ],
+      "ontology_mode": "generate",
+      "simulation_requirement": "한국어 사회 이슈 문서에서 보고서 작성에 필요한 핵심 근거를 정리하라.",
+      "queries": [
+        "핵심 쟁점과 참여자를 요약해라.",
+        "보고서에 넣을 중요한 사실을 찾아라."
+      ],
+      "expected_outputs": [
+        "graph",
+        "search",
+        "report"
+      ]
+    },
+    {
+      "id": "en_profile_case",
+      "language": "en",
+      "purpose": "profile context and completeness",
+      "description": "Profile context richness and completeness for Oasis profile generation.",
+      "documents": [
+        "documents/en_profile_case.md"
+      ],
+      "ontology_mode": "generate",
+      "simulation_requirement": "Build enough context to generate complete agent profiles for a launch team.",
+      "queries": [
+        "What motivates each launch team member?",
+        "Which relationships are most relevant for profile generation?"
+      ],
+      "expected_outputs": [
+        "graph",
+        "search",
+        "profile"
+      ]
+    },
+    {
+      "id": "sim_memory_case",
+      "language": "ko",
+      "purpose": "simulation memory ingestion",
+      "description": "Simulation action logs added via graph.add(...) must remain retrievable.",
+      "documents": [
+        "documents/sim_memory_case.md"
+      ],
+      "ontology_mode": "generate",
+      "simulation_requirement": "시뮬레이션 행동 로그를 누적하고 기억 변화가 검색 결과에 반영되는지 확인하라.",
+      "queries": [
+        "어떤 사용자가 최근에 새 상호작용을 만들었는가?",
+        "행동 로그 이후 기억 그래프가 어떻게 변했는가?"
+      ],
+      "expected_outputs": [
+        "graph",
+        "search",
+        "profile",
+        "report",
+        "memory_update"
+      ]
+    }
+  ]
+}

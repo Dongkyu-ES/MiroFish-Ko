@@ -15,10 +15,16 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from ..config import Config
+
+if Config.GRAPH_BACKEND == "local_primary":
+    from backend.bootstrap_graph_backend import bootstrap_graph_backend
+
+    bootstrap_graph_backend()
+
 from openai import OpenAI
 from zep_cloud.client import Zep
 
-from ..config import Config
 from ..utils.logger import get_logger
 from .zep_entity_reader import EntityNode, ZepEntityReader
 
@@ -198,7 +204,7 @@ class OasisProfileGenerator:
         )
         
         # Zep
-        self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
+        self.zep_api_key = zep_api_key or ("__local__" if Config.GRAPH_BACKEND == "local_primary" else Config.ZEP_API_KEY)
         self.zep_client = None
         self.graph_id = graph_id
         
@@ -312,85 +318,57 @@ class OasisProfileGenerator:
         if not self.graph_id:
             logger.debug(f"Zep:graph_id")
             return results
-        
-        comprehensive_query = f"{entity_name}정보, , , 관계"
-        
-        def search_edges():
-            """검색엣지(사실/관계)- """
+
+        queries = self._build_entity_search_queries(entity)
+
+        def search_scope(query: str, scope: str, limit: int):
             max_retries = 3
-            last_exception = None
             delay = 2.0
-            
+
             for attempt in range(max_retries):
                 try:
                     return self.zep_client.graph.search(
-                        query=comprehensive_query,
+                        query=query,
                         graph_id=self.graph_id,
-                        limit=30,
-                        scope="edges",
+                        limit=limit,
+                        scope=scope,
                         reranker="rrf"
                     )
                 except Exception as e:
-                    last_exception = e
                     if attempt < max_retries - 1:
-                        logger.debug(f"Zep엣지검색 {attempt + 1}회실패: {str(e)[:80]}, 진행 중")
+                        logger.debug(f"Zep{scope}검색 {attempt + 1}회실패: {str(e)[:80]}, 진행 중")
                         time.sleep(delay)
                         delay *= 2
                     else:
-                        logger.debug(f"Zep엣지검색 {max_retries}회실패: {e}")
-            return None
-        
-        def search_nodes():
-            """검색노드(엔터티요약)- """
-            max_retries = 3
-            last_exception = None
-            delay = 2.0
-            
-            for attempt in range(max_retries):
-                try:
-                    return self.zep_client.graph.search(
-                        query=comprehensive_query,
-                        graph_id=self.graph_id,
-                        limit=20,
-                        scope="nodes",
-                        reranker="rrf"
-                    )
-                except Exception as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        logger.debug(f"Zep노드검색 {attempt + 1}회실패: {str(e)[:80]}, 진행 중")
-                        time.sleep(delay)
-                        delay *= 2
-                    else:
-                        logger.debug(f"Zep노드검색 {max_retries}회실패: {e}")
+                        logger.debug(f"Zep{scope}검색 {max_retries}회실패: {e}")
             return None
         
         try:
-            # 병렬edgesnodes검색
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                edge_future = executor.submit(search_edges)
-                node_future = executor.submit(search_nodes)
-                
-                # 
-                edge_result = edge_future.result(timeout=30)
-                node_result = node_future.result(timeout=30)
-            
             # 엣지검색
             all_facts = set()
-            if edge_result and hasattr(edge_result, 'edges') and edge_result.edges:
-                for edge in edge_result.edges:
-                    if hasattr(edge, 'fact') and edge.fact:
-                        all_facts.add(edge.fact)
-            results["facts"] = list(all_facts)
-            
-            # 노드검색
             all_summaries = set()
-            if node_result and hasattr(node_result, 'nodes') and node_result.nodes:
-                for node in node_result.nodes:
-                    if hasattr(node, 'summary') and node.summary:
-                        all_summaries.add(node.summary)
-                    if hasattr(node, 'name') and node.name and node.name != entity_name:
-                        all_summaries.add(f"엔터티: {node.name}")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(queries) * 2)) as executor:
+                futures = []
+                for query in queries:
+                    futures.append(("edges", query, executor.submit(search_scope, query, "edges", 30)))
+                    futures.append(("nodes", query, executor.submit(search_scope, query, "nodes", 20)))
+
+                for scope, query, future in futures:
+                    result = future.result(timeout=30)
+                    if scope == "edges":
+                        if result and hasattr(result, 'edges') and result.edges:
+                            for edge in result.edges:
+                                if hasattr(edge, 'fact') and edge.fact:
+                                    all_facts.add(edge.fact)
+                    else:
+                        if result and hasattr(result, 'nodes') and result.nodes:
+                            for node in result.nodes:
+                                if hasattr(node, 'summary') and node.summary:
+                                    all_summaries.add(node.summary)
+                                if hasattr(node, 'name') and node.name and node.name != entity_name:
+                                    all_summaries.add(f"엔터티: {node.name}")
+            results["facts"] = list(all_facts)
             results["node_summaries"] = list(all_summaries)
             
             # 
@@ -409,6 +387,44 @@ class OasisProfileGenerator:
             logger.warning(f"Zep실패 ({entity_name}): {e}")
         
         return results
+
+    def _build_entity_search_queries(self, entity: EntityNode) -> List[str]:
+        """엔터티명/별칭/요약 키워드 기반의 짧은 Zep 검색 질의를 만든다."""
+        import re
+
+        queries: List[str] = []
+        entity_name = (entity.name or "").strip()
+        if entity_name:
+            queries.append(entity_name)
+            queries.append(f"{entity_name} 관계")
+
+        attributes = entity.attributes or {}
+        aliases = attributes.get("alias") or attributes.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        for alias in aliases:
+            alias_text = str(alias).strip()
+            if alias_text:
+                queries.append(alias_text)
+
+        summary = (getattr(entity, "summary", "") or "").strip()
+        if summary:
+            tokens = re.findall(r"[A-Za-z0-9가-힣]+", summary)
+            keywords = [token for token in tokens if len(token) >= 2][:4]
+            if keywords:
+                queries.append(f"{entity_name} {' '.join(keywords[:3])}".strip())
+
+        deduped = []
+        seen = set()
+        for query in queries:
+            normalized = query.strip()
+            if not normalized or normalized in seen:
+                continue
+            deduped.append(normalized)
+            seen.add(normalized)
+            if len(deduped) >= 4:
+                break
+        return deduped or [entity_name]
     
     def _build_entity_context(self, entity: EntityNode) -> str:
         """

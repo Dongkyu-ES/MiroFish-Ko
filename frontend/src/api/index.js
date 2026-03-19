@@ -35,6 +35,12 @@ service.interceptors.response.use(
   },
   error => {
     console.error('Response error:', error)
+
+    const apiError =
+      error?.response?.data?.error ||
+      error?.response?.data?.message ||
+      error?.message ||
+      'Error'
     
     // 타임아웃 처리
     if (error.code === 'ECONNABORTED' && error.message.includes('timeout')) {
@@ -46,7 +52,10 @@ service.interceptors.response.use(
       console.error('Network error - please check your connection')
     }
     
-    return Promise.reject(error)
+    const wrapped = new Error(apiError)
+    wrapped.response = error.response
+    wrapped.code = error.code
+    return Promise.reject(wrapped)
   }
 )
 

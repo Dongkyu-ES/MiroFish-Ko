@@ -11,6 +11,13 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ..config import Config
+
+if Config.GRAPH_BACKEND == "local_primary":
+    from backend.bootstrap_graph_backend import bootstrap_graph_backend
+
+    bootstrap_graph_backend()
+
 from zep_cloud import InternalServerError
 from zep_cloud.client import Zep
 
@@ -19,7 +26,6 @@ from .logger import get_logger
 logger = get_logger('mirofish.zep_paging')
 
 _DEFAULT_PAGE_SIZE = 100
-_MAX_NODES = 2000
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_RETRY_DELAY = 2.0  # 초 단위, 재시도마다 2배 증가
 
@@ -61,14 +67,15 @@ def fetch_all_nodes(
     client: Zep,
     graph_id: str,
     page_size: int = _DEFAULT_PAGE_SIZE,
-    max_items: int = _MAX_NODES,
+    max_items: int | None = None,
     max_retries: int = _DEFAULT_MAX_RETRIES,
     retry_delay: float = _DEFAULT_RETRY_DELAY,
 ) -> list[Any]:
-    """그래프 노드를 페이지 단위로 조회합니다. 최대 `max_items`(기본 2000)까지 반환하며, 각 페이지 요청은 재시도를 포함합니다."""
+    """그래프 노드를 페이지 단위로 조회합니다. 필요 시 `max_items`로 상한을 둘 수 있으며, 각 페이지 요청은 재시도를 포함합니다."""
     all_nodes: list[Any] = []
     cursor: str | None = None
     page_num = 0
+    seen_cursors: set[str] = set()
 
     while True:
         kwargs: dict[str, Any] = {"limit": page_size}
@@ -88,7 +95,7 @@ def fetch_all_nodes(
             break
 
         all_nodes.extend(batch)
-        if len(all_nodes) >= max_items:
+        if max_items is not None and len(all_nodes) >= max_items:
             all_nodes = all_nodes[:max_items]
             logger.warning(f"Node count reached limit ({max_items}), stopping pagination for graph {graph_id}")
             break
@@ -99,6 +106,10 @@ def fetch_all_nodes(
         if cursor is None:
             logger.warning(f"Node missing uuid field, stopping pagination at {len(all_nodes)} nodes")
             break
+        if cursor in seen_cursors:
+            logger.warning(f"Repeated node cursor detected ({cursor}), stopping pagination for graph {graph_id}")
+            break
+        seen_cursors.add(cursor)
 
     return all_nodes
 

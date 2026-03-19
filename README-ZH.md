@@ -162,6 +162,35 @@ npm run backend   #
 npm run frontend  # 
 ```
 
+### Local Graph Engine
+
+Standalone parity engine:
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Default runtime contract:
+
+- backend: `5001`
+- engine: `8123`
+- `GRAPH_BACKEND=zep`
+- `GRAPH_BACKEND=shadow_eval`
+- `GRAPH_BACKEND=local_primary`
+- `ENGINE_BASE_URL=http://127.0.0.1:8123`
+- `ENGINE_HOST=127.0.0.1`
+- `ENGINE_PORT=8123`
+- `ENGINE_SHARED_TOKEN`
+- `SECRET_KEY`
+- `GRAPHITI_BACKEND=kuzu`
+- `GRAPHITI_DB_PATH=./data/graphiti.kuzu`
+- `GRAPHITI_PARITY_ARTIFACT_DIR=./artifacts/parity`
+- `GRAPHITI_LLM_*`, `GRAPHITI_EMBEDDING_*`, `GRAPHITI_RERANK_*`
+- `GRAPHITI_DEFAULT_LANGUAGES=ko,en`
+- `GRAPHITI_STDOUT_LOGGING=true`
+- cutover to `local_primary` requires parity scorecards and compatibility gates to pass
+
 ### Docker 
 
 ```bash
@@ -201,3 +230,23 @@ MiroFish  **[OASIS](https://github.com/camel-ai/oasis)** � CAMEL-AI �
    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&legend=top-left" />
  </picture>
 </a>
+
+## Local Graph Engine
+
+Standalone parity engine:
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Default runtime contract:
+
+- backend: `5001`
+- engine: `8123`
+- `GRAPH_BACKEND=zep`
+- `GRAPH_BACKEND=shadow_eval`
+- `GRAPH_BACKEND=local_primary`
+- `ENGINE_BASE_URL=http://127.0.0.1:8123`
+- `GRAPHITI_BACKEND=kuzu`
+- first-class providers: OpenAI, OpenRouter, Ollama, LM Studio

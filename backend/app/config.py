@@ -11,18 +11,18 @@ from dotenv import load_dotenv
 project_root_env = os.path.join(os.path.dirname(__file__), '../../.env')
 
 if os.path.exists(project_root_env):
-    load_dotenv(project_root_env, override=True)
+    load_dotenv(project_root_env, override=False)
 else:
     # 루트에 `.env`가 없으면 시스템 환경 변수를 사용(운영 환경용)
-    load_dotenv(override=True)
+    load_dotenv(override=False)
 
 
 class Config:
     """Flask 설정 클래스"""
     
     # Flask 설정
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
-    DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
+    SECRET_KEY = os.environ.get('SECRET_KEY', '')
+    DEBUG = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
     
     # JSON 설정 - ASCII 이스케이프 비활성화(문자가 `\\uXXXX` 대신 그대로 표시)
     JSON_AS_ASCII = False
@@ -34,6 +34,13 @@ class Config:
     
     # Zep 설정
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
+
+    # Graph backend runtime mode
+    GRAPH_BACKEND = os.environ.get('GRAPH_BACKEND', 'zep')
+    ENGINE_BASE_URL = os.environ.get('ENGINE_BASE_URL', 'http://127.0.0.1:8123')
+    ENGINE_TIMEOUT_SECONDS = int(os.environ.get('ENGINE_TIMEOUT_SECONDS', '30'))
+    ENGINE_SHADOW_EVAL_ENABLED = os.environ.get('ENGINE_SHADOW_EVAL_ENABLED', 'false').lower() == 'true'
+    ENGINE_DEFAULT_PORT = int(os.environ.get('ENGINE_PORT', '8123'))
     
     # 파일 업로드 설정
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
@@ -62,13 +69,21 @@ class Config:
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
+
+    @classmethod
+    def requires_zep_api_key(cls) -> bool:
+        return cls.GRAPH_BACKEND in {'zep', 'shadow_eval'}
     
     @classmethod
     def validate(cls):
         """필수 설정 검증"""
         errors = []
+        if cls.GRAPH_BACKEND not in {'zep', 'shadow_eval', 'local_primary'}:
+            errors.append("GRAPH_BACKEND는 zep, shadow_eval, local_primary 중 하나여야 합니다.")
+        if not cls.SECRET_KEY:
+            errors.append("SECRET_KEY가 설정되지 않았습니다.")
         if not cls.LLM_API_KEY:
             errors.append("LLM_API_KEY가 설정되지 않았습니다.")
-        if not cls.ZEP_API_KEY:
+        if cls.requires_zep_api_key() and not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY가 설정되지 않았습니다.")
         return errors

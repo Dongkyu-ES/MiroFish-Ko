@@ -54,9 +54,10 @@ class LLMClient:
         kwargs = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        kwargs[self._token_param_name()] = max_tokens
+        if self._supports_custom_temperature():
+            kwargs["temperature"] = temperature
         
         if response_format:
             kwargs["response_format"] = response_format
@@ -100,3 +101,13 @@ class LLMClient:
             return json.loads(cleaned_response)
         except json.JSONDecodeError:
             raise ValueError(f"LLM이 반환한 JSON 형식이 올바르지 않습니다: {cleaned_response}")
+
+    def _token_param_name(self) -> str:
+        normalized_model = (self.model or "").strip().lower()
+        if normalized_model.startswith(("gpt-5", "o1", "o3", "o4")):
+            return "max_completion_tokens"
+        return "max_tokens"
+
+    def _supports_custom_temperature(self) -> bool:
+        normalized_model = (self.model or "").strip().lower()
+        return not normalized_model.startswith(("gpt-5", "o1", "o3", "o4"))
