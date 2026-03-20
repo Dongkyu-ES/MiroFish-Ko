@@ -122,3 +122,15 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
         )
+
+    def close(self):
+        """Gemini OpenAI 클라이언트의 httpx 연결 풀을 해제한다."""
+        if hasattr(self, "_gemini_client") and self._gemini_client is not None:
+            try:
+                self._gemini_client.close()
+            except Exception:
+                pass
+            self._gemini_client = None
+
+    def __del__(self):
+        self.close()

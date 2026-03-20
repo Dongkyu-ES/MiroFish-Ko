@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +30,11 @@ RATE_LIMIT_PATTERNS = (
 
 class CodexBroker:
     """Codex CLI 호출 래퍼."""
-    
+
+    TASK_DIR_MAX_AGE_SEC = 3600  # 1시간
+    _CLEANUP_INTERVAL_SEC = 300  # 5분마다 최대 1회 정리
+    _last_cleanup_time: float = 0.0
+
     def __init__(
         self,
         codex_bin: Optional[str] = None,
@@ -53,7 +58,30 @@ class CodexBroker:
         self.sandbox = sandbox or Config.CODEX_SANDBOX
         
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    def cleanup_old_tasks(self):
+        """TASK_DIR_MAX_AGE_SEC보다 오래된 태스크 디렉터리를 삭제한다. _CLEANUP_INTERVAL_SEC마다 최대 1회 실행."""
+        import shutil
+        now = time.time()
+        if now - CodexBroker._last_cleanup_time < self._CLEANUP_INTERVAL_SEC:
+            return 0
+        CodexBroker._last_cleanup_time = now
+        removed = 0
+        if not self.tasks_dir.exists():
+            return 0
+        for entry in self.tasks_dir.iterdir():
+            if entry.is_dir():
+                try:
+                    age = now - entry.stat().st_mtime
+                    if age > self.TASK_DIR_MAX_AGE_SEC:
+                        shutil.rmtree(entry)
+                        removed += 1
+                except OSError:
+                    pass
+        if removed:
+            logger.info(f"오래된 태스크 디렉터리 {removed}개 삭제: {self.tasks_dir}")
+        return removed
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -88,6 +116,7 @@ class CodexBroker:
         messages: List[Dict[str, str]],
         timeout_sec: int,
     ) -> str:
+        self.cleanup_old_tasks()
         prompt = self._messages_to_prompt(messages, expect_json=False)
         task_dir = self._create_task_dir(task_name)
         output_file = task_dir / 'result.txt'
@@ -129,6 +158,7 @@ class CodexBroker:
         schema: Optional[Dict[str, Any]],
         timeout_sec: int,
     ) -> Dict[str, Any]:
+        self.cleanup_old_tasks()
         prompt = self._messages_to_prompt(messages, expect_json=True)
         task_dir = self._create_task_dir(task_name)
         output_file = task_dir / 'result.json'

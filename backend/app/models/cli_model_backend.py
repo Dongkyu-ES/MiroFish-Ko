@@ -444,6 +444,7 @@ class CliModelBackend(BaseModelBackend):
         except asyncio.TimeoutError:
             try:
                 proc.kill()  # type: ignore[union-attr]
+                await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:
                 pass
             return "", f"timeout after {timeout}s"
