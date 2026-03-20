@@ -684,11 +684,36 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
-onMounted(() => {
+onMounted(async () => {
   addLog('Step3 시뮬레이션 실행 초기화')
-  if (props.simulationId) {
-    doStartSimulation()
+  if (!props.simulationId) return
+
+  // 먼저 현재 시뮬레이션 상태를 확인 — completed/stopped면 재시작하지 않음
+  try {
+    const statusRes = await getRunStatus(props.simulationId)
+    if (statusRes.success && statusRes.data) {
+      const rs = statusRes.data.runner_status
+      if (rs === 'completed' || rs === 'stopped') {
+        addLog(`시뮬레이션 이미 완료 (${rs}), 결과 표시 모드로 진입`)
+        runStatus.value = statusRes.data
+        phase.value = 2  // 완료 상태 — 리포트 생성 버튼 활성화
+        emit('update-status', 'completed')
+        return
+      } else if (rs === 'running') {
+        addLog('시뮬레이션 실행 중 감지, 모니터링 모드로 진입')
+        runStatus.value = statusRes.data
+        phase.value = 1
+        emit('update-status', 'processing')
+        startPolling()
+        return
+      }
+    }
+  } catch (err) {
+    addLog(`실행 상태 확인 실패: ${err.message}, 새 시뮬레이션 시작`)
   }
+
+  // 상태 없거나 idle이면 새로 시작
+  doStartSimulation()
 })
 
 onUnmounted(() => {
