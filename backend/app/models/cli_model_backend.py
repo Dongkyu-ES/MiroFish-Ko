@@ -95,8 +95,19 @@ class CliModelBackend(BaseModelBackend):
             )
             self._cli_tool = "claude" if claude_primary else "codex"
 
-        self._model_name = model_name or os.environ.get(
-            "LLM_MODEL_NAME", "gpt-4o-mini"
+        # CLI 도구별 모델명 분리
+        if model_name:
+            self._claude_model = model_name
+            self._codex_model = model_name
+        else:
+            self._claude_model = os.environ.get(
+                "CLAUDE_MODEL_FAST", "claude-haiku-4-5"
+            )
+            self._codex_model = os.environ.get(
+                "CODEX_JSON_MODEL", "gpt-5.3-codex-spark"
+            )
+        self._model_name = (
+            self._claude_model if self._cli_tool == "claude" else self._codex_model
         )
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -123,6 +134,7 @@ class CliModelBackend(BaseModelBackend):
 
         if tool == "codex":
             codex_bin = os.environ.get("CODEX_BIN", "codex")
+            model = self._codex_model
             return [
                 codex_bin,
                 "exec",
@@ -130,16 +142,17 @@ class CliModelBackend(BaseModelBackend):
                 "--sandbox",
                 "read-only",
                 "-m",
-                self._model_name,
+                model,
                 "-",
             ]
         else:
             claude_bin = os.environ.get("CLAUDE_BIN", "claude")
+            model = self._claude_model
             return [
                 claude_bin,
                 "-p",
                 "--model",
-                self._model_name,
+                model,
                 "--output-format",
                 "text",
             ]
