@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -39,13 +40,21 @@ class LocalGraphRepository:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_db()
     
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def get_connection(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
-    
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self.get_connection() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS graphs (
@@ -91,7 +100,7 @@ class LocalGraphRepository:
     
     def create_graph(self, name: str, description: str = "") -> str:
         graph_id = f"local_{uuid.uuid4().hex[:16]}"
-        with self._connect() as conn:
+        with self.get_connection() as conn:
             conn.execute(
                 "INSERT INTO graphs (graph_id, name, description) VALUES (?, ?, ?)",
                 (graph_id, name, description),
@@ -99,7 +108,7 @@ class LocalGraphRepository:
         return graph_id
     
     def get_graph(self, graph_id: str) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self.get_connection() as conn:
             row = conn.execute(
                 "SELECT graph_id, name, description, ontology_json, created_at, updated_at FROM graphs WHERE graph_id = ?",
                 (graph_id,),
@@ -117,7 +126,7 @@ class LocalGraphRepository:
         }
     
     def save_ontology(self, graph_id: str, ontology: Dict[str, Any]) -> None:
-        with self._connect() as conn:
+        with self.get_connection() as conn:
             conn.execute(
                 """
                 UPDATE graphs
@@ -133,7 +142,7 @@ class LocalGraphRepository:
         nodes: List[Dict[str, Any]],
         edges: List[Dict[str, Any]],
     ) -> None:
-        with self._connect() as conn:
+        with self.get_connection() as conn:
             conn.execute("DELETE FROM nodes WHERE graph_id = ?", (graph_id,))
             conn.execute("DELETE FROM edges WHERE graph_id = ?", (graph_id,))
             
@@ -184,7 +193,7 @@ class LocalGraphRepository:
 
     def append_activity_batch(self, graph_id: str, activities: List[Dict[str, Any]]) -> int:
         inserted = 0
-        with self._connect() as conn:
+        with self.get_connection() as conn:
             for activity in activities:
                 agent_name = (activity.get("agent_name") or "").strip()
                 if not agent_name:
@@ -301,7 +310,7 @@ class LocalGraphRepository:
         return None
     
     def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
-        with self._connect() as conn:
+        with self.get_connection() as conn:
             nodes_rows = conn.execute(
                 "SELECT * FROM nodes WHERE graph_id = ? ORDER BY rowid ASC",
                 (graph_id,),
@@ -368,7 +377,7 @@ class LocalGraphRepository:
         )
     
     def delete_graph(self, graph_id: str) -> bool:
-        with self._connect() as conn:
+        with self.get_connection() as conn:
             conn.execute("DELETE FROM nodes WHERE graph_id = ?", (graph_id,))
             conn.execute("DELETE FROM edges WHERE graph_id = ?", (graph_id,))
             cur = conn.execute("DELETE FROM graphs WHERE graph_id = ?", (graph_id,))
