@@ -81,6 +81,7 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
+import { listSimulations } from '../api/simulation'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 
 const route = useRoute()
@@ -245,6 +246,24 @@ const loadProject = async () => {
       } else if (res.data.status === 'graph_completed' && res.data.graph_id) {
         currentPhase.value = 2
         await loadGraph(res.data.graph_id)
+        // 시뮬레이션 상태 감지 → 자동 라우트 이동
+        try {
+          const simRes = await listSimulations(currentProjectId.value)
+          if (simRes.success && simRes.data && simRes.data.length > 0) {
+            const sim = simRes.data[0]
+            if (['completed', 'stopped'].includes(sim.status)) {
+              addLog(`시뮬레이션 완료 감지 (${sim.simulation_id}), 리포트 생성 화면으로 이동`)
+              router.push({ name: 'SimulationRun', params: { simulationId: sim.simulation_id } })
+              return
+            } else if (['running', 'ready'].includes(sim.status)) {
+              addLog(`시뮬레이션 진행 중 감지 (${sim.status}), 환경 설정 화면으로 이동`)
+              router.push({ name: 'Simulation', params: { simulationId: sim.simulation_id } })
+              return
+            }
+          }
+        } catch (simErr) {
+          addLog(`시뮬레이션 상태 확인 실패: ${simErr.message}`)
+        }
       }
     } else {
       error.value = res.error
