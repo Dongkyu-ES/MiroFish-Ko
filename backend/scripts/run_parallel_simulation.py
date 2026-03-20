@@ -991,10 +991,28 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
         config: 시뮬레이션설정
         use_boost:  LLM 설정()
     """
+    # Gemini 백엔드 모드: Flash 먼저, 실패 시 Flash Lite 폴백
+    llm_backend = os.environ.get("LLM_BACKEND", "").lower()
+    if llm_backend == "gemini":
+        gemini_primary = os.environ.get("OASIS_GEMINI_MODEL", "gemini-2.0-flash")
+        gemini_fallback = os.environ.get("OASIS_GEMINI_FALLBACK", "gemini-2.0-flash-lite")
+        try:
+            print(f"[LLM] Gemini 1차 모델 시도: {gemini_primary}")
+            return ModelFactory.create(
+                model_platform=ModelPlatformType.GEMINI,
+                model_type=gemini_primary,
+            )
+        except Exception as e:
+            print(f"[LLM] Gemini 1차 실패 ({gemini_primary}): {e}")
+            print(f"[LLM] Gemini 2차 폴백: {gemini_fallback}")
+            return ModelFactory.create(
+                model_platform=ModelPlatformType.GEMINI,
+                model_type=gemini_fallback,
+            )
+
     # CLI 백엔드 모드: API 키 없이 CLI로 직접 호출
-    cli_backend = os.environ.get("LLM_BACKEND", "").lower()
     llm_base_url = os.environ.get("LLM_BASE_URL", "")
-    if cli_backend == "cli" or llm_base_url == "codex_cli":
+    if llm_backend == "cli" or llm_base_url == "codex_cli":
         from app.models.cli_model_backend import CliModelBackend
         print("[LLM] CLI 백엔드 모드: Codex/Claude CLI로 직접 호출")
         return CliModelBackend(model_type="cli-model")
