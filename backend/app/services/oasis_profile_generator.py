@@ -9,6 +9,7 @@ Zep그래프진행 중티OASIS시뮬레이션플랫폼Agent Profile
 """
 
 import json
+import os
 import random
 import time
 from typing import Dict, Any, List, Optional
@@ -297,7 +298,11 @@ class OasisProfileGenerator:
         
         if not self.zep_client:
             return {"facts": [], "node_summaries": [], "context": ""}
-        
+
+        # 로컬 그래프는 Zep 검색 불필요 — 바로 반환
+        if self.graph_id and self.graph_id.startswith("local_"):
+            return {"facts": [], "node_summaries": [], "context": ""}
+
         entity_name = entity.name
         
         results = {
@@ -524,44 +529,30 @@ class OasisProfileGenerator:
         
         for attempt in range(max_attempts):
             try:
-                content = self.llm_client.chat(
+                result = self.llm_client.chat_json(
                     messages=[
                         {"role": "system", "content": self._get_system_prompt(is_individual)},
                         {"role": "user", "content": prompt}
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0.7 - (attempt * 0.1)  # 
-                    # max_tokens, LLM
+                    temperature=0.7 - (attempt * 0.1)
                 )
-                
-                # JSON
-                try:
-                    result = json.loads(content)
-                    
-                    # 
-                    if "bio" not in result or not result["bio"]:
-                        result["bio"] = entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}"
-                    if "persona" not in result or not result["persona"]:
-                        result["persona"] = entity_summary or f"{entity_name}{entity_type}."
-                    
-                    return result
-                    
-                except json.JSONDecodeError as je:
-                    logger.warning(f"JSON실패 (attempt {attempt+1}): {str(je)[:80]}")
-                    
-                    # JSON
-                    result = self._try_fix_json(content, entity_name, entity_type, entity_summary)
-                    if result.get("_fixed"):
-                        del result["_fixed"]
-                        return result
-                    
-                    last_error = je
-                    
+
+                # 필수 필드 보정
+                if "bio" not in result or not result["bio"]:
+                    result["bio"] = entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}"
+                if "persona" not in result or not result["persona"]:
+                    result["persona"] = entity_summary or f"{entity_name}{entity_type}."
+
+                return result
+
+            except (json.JSONDecodeError, ValueError) as je:
+                logger.warning(f"JSON실패 (attempt {attempt+1}): {str(je)[:80]}")
+                last_error = je
             except Exception as e:
                 logger.warning(f"LLM호출실패 (attempt {attempt+1}): {str(e)[:80]}")
                 last_error = e
                 import time
-                time.sleep(1 * (attempt + 1))  # 
+                time.sleep(1 * (attempt + 1))  #
         
         logger.warning(f"LLM생성 실패({max_attempts}): {last_error}, 생성")
         return self._generate_profile_rule_based(
@@ -851,38 +842,96 @@ class OasisProfileGenerator:
         """
         import concurrent.futures
         from threading import Lock
-        
+
         # graph_idZep
         if graph_id:
             self.graph_id = graph_id
-        
+
         total = len(entities)
         profiles = [None] * total  # 목록
         completed_count = [0]  # 목록
         lock = Lock()
-        
+        write_lock = Lock()  # 파일 쓰기 전용 락 (read lock과 분리)
+
+        # ========== 기존 프로필 복원 (resume) ==========
+        existing_name_set = set()
+        if realtime_output_path and os.path.exists(realtime_output_path):
+            try:
+                if output_platform == "reddit":
+                    with open(realtime_output_path, 'r', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+                    name_to_profile = {p.get("name"): p for p in existing_data if p.get("name")}
+                else:
+                    import csv
+                    with open(realtime_output_path, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        existing_data = list(reader)
+                    name_to_profile = {p.get("name"): p for p in existing_data if p.get("name")}
+
+                # 기존 프로필을 entities 인덱스에 매칭
+                for idx, entity in enumerate(entities):
+                    if entity.name in name_to_profile:
+                        p = name_to_profile[entity.name]
+                        entity_type = entity.get_entity_type() or "Entity"
+                        profiles[idx] = OasisAgentProfile(
+                            user_id=idx,
+                            user_name=p.get("username", self._generate_username(entity.name)),
+                            name=entity.name,
+                            bio=p.get("bio", ""),
+                            persona=p.get("persona", ""),
+                            karma=int(p.get("karma", 1000)) if p.get("karma") else 1000,
+                            friend_count=int(p.get("friend_count", 100)) if p.get("friend_count") else 100,
+                            follower_count=int(p.get("follower_count", 200)) if p.get("follower_count") else 200,
+                            statuses_count=int(p.get("statuses_count", 500)) if p.get("statuses_count") else 500,
+                            age=int(p["age"]) if p.get("age") else None,
+                            gender=p.get("gender"),
+                            mbti=p.get("mbti"),
+                            country=p.get("country"),
+                            profession=p.get("profession"),
+                            interested_topics=p.get("interested_topics", []),
+                            source_entity_uuid=entity.uuid,
+                            source_entity_type=entity_type,
+                        )
+                        existing_name_set.add(entity.name)
+
+                resumed_count = len(existing_name_set)
+                completed_count[0] = resumed_count
+                logger.info(f"기존 프로필 {resumed_count}/{total}개 복원 완료, 나머지 {total - resumed_count}개 생성")
+            except Exception as e:
+                logger.warning(f"기존 프로필 복원 실패, 전체 재생성: {e}")
+                existing_name_set.clear()
+                profiles = [None] * total
+                completed_count[0] = 0
+
+        # 생성이 필요한 엔터티만 필터링
+        pending_entities = [
+            (idx, entity) for idx, entity in enumerate(entities)
+            if entity.name not in existing_name_set
+        ]
+
         # 쓰기파일
         def save_profiles_realtime():
             """저장생성 profiles 파일"""
             if not realtime_output_path:
                 return
-            
-            with lock:
-                # 생성 profiles
-                existing_profiles = [p for p in profiles if p is not None]
-                if not existing_profiles:
+
+            with write_lock:
+                # 생성 profiles (스냅샷)
+                with lock:
+                    snapshot = [p for p in profiles if p is not None]
+                if not snapshot:
                     return
-                
+
                 try:
                     if output_platform == "reddit":
-                        # Reddit JSON 
-                        profiles_data = [p.to_reddit_format() for p in existing_profiles]
+                        # Reddit JSON
+                        profiles_data = [p.to_reddit_format() for p in snapshot]
                         with open(realtime_output_path, 'w', encoding='utf-8') as f:
                             json.dump(profiles_data, f, ensure_ascii=False, indent=2)
                     else:
-                        # Twitter CSV 
+                        # Twitter CSV
                         import csv
-                        profiles_data = [p.to_twitter_format() for p in existing_profiles]
+                        profiles_data = [p.to_twitter_format() for p in snapshot]
                         if profiles_data:
                             fieldnames = list(profiles_data[0].keys())
                             with open(realtime_output_path, 'w', encoding='utf-8', newline='') as f:
@@ -891,23 +940,23 @@ class OasisProfileGenerator:
                                 writer.writerows(profiles_data)
                 except Exception as e:
                     logger.warning(f"저장 profiles 실패: {e}")
-        
+
         def generate_single_profile(idx: int, entity: EntityNode) -> tuple:
             """생성profile"""
             entity_type = entity.get_entity_type() or "Entity"
-            
+
             try:
                 profile = self.generate_profile_from_entity(
                     entity=entity,
                     user_id=idx,
                     use_llm=use_llm
                 )
-                
+
                 # 생성콘솔로그
                 self._print_generated_profile(entity.name, entity_type, profile)
-                
+
                 return idx, profile, None
-                
+
             except Exception as e:
                 logger.error(f"생성엔터티 {entity.name} 실패: {str(e)}")
                 # profile
@@ -921,64 +970,70 @@ class OasisProfileGenerator:
                     source_entity_type=entity_type,
                 )
                 return idx, fallback_profile, str(e)
-        
-        logger.info(f"시작병렬생성 {total}개Agent(병렬: {parallel_count})...")
+
+        remaining = len(pending_entities)
+        logger.info(f"시작병렬생성 {remaining}개Agent(총 {total}개 중 {completed_count[0]}개 복원됨, 병렬: {parallel_count})...")
         print(f"\n{'='*60}")
-        print(f"시작생성Agent - 총 {total}개엔터티, 병렬: {parallel_count}")
+        print(f"시작생성Agent - 총 {total}개엔터티, 복원 {completed_count[0]}개, 생성 {remaining}개, 병렬: {parallel_count}")
         print(f"{'='*60}\n")
         
-        # 병렬
+        # 모든 프로필이 이미 복원된 경우 바로 반환
+        if not pending_entities:
+            logger.info(f"전체 {total}개 프로필 복원 완료, 생성 불필요")
+            final_profiles = [p for p in profiles if p is not None]
+            return final_profiles
+
+        # 병렬 (pending_entities만 생성)
         with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_count) as executor:
-            # 작업
+            # 작업 (누락분만 submit)
             future_to_entity = {
                 executor.submit(generate_single_profile, idx, entity): (idx, entity)
-                for idx, entity in enumerate(entities)
+                for idx, entity in pending_entities
             }
-            
-            # 
+
+            #
             for future in concurrent.futures.as_completed(future_to_entity):
                 idx, entity = future_to_entity[future]
                 entity_type = entity.get_entity_type() or "Entity"
-                
+
                 try:
                     result_idx, profile, error = future.result()
-                    profiles[result_idx] = profile
-                    
                     with lock:
+                        profiles[result_idx] = profile
                         completed_count[0] += 1
                         current = completed_count[0]
-                    
+
                     # 쓰기파일
                     save_profiles_realtime()
-                    
+
                     if progress_callback:
                         progress_callback(
-                            current, 
-                            total, 
+                            current,
+                            total,
                             f"완료 {current}/{total}: {entity.name}({entity_type})"
                         )
-                    
+
                     if error:
                         logger.warning(f"[{current}/{total}] {entity.name} : {error}")
                     else:
                         logger.info(f"[{current}/{total}] 생성: {entity.name} ({entity_type})")
-                        
+
                 except Exception as e:
                     logger.error(f"엔터티 {entity.name} : {str(e)}")
                     with lock:
                         completed_count[0] += 1
-                    profiles[idx] = OasisAgentProfile(
-                        user_id=idx,
-                        user_name=self._generate_username(entity.name),
-                        name=entity.name,
-                        bio=f"{entity_type}: {entity.name}",
-                        persona=entity.summary or "A participant in social discussions.",
-                        source_entity_uuid=entity.uuid,
-                        source_entity_type=entity_type,
-                    )
+                        profiles[idx] = OasisAgentProfile(
+                            user_id=idx,
+                            user_name=self._generate_username(entity.name),
+                            name=entity.name,
+                            bio=f"{entity_type}: {entity.name}",
+                            persona=entity.summary or "A participant in social discussions.",
+                            source_entity_uuid=entity.uuid,
+                            source_entity_type=entity_type,
+                        )
                     # 쓰기파일()
                     save_profiles_realtime()
-        
+
         print(f"\n{'='*60}")
         print(f"생성완료!생성 {len([p for p in profiles if p])}개Agent")
         print(f"{'='*60}\n")

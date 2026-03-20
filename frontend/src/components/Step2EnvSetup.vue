@@ -135,6 +135,17 @@
           
           <!-- Config Preview -->
           <div v-if="simulationConfig" class="config-detail-panel">
+            <!-- 재검토 배너 -->
+            <div v-if="regenerationStats?.needsRegeneration && !isRegenerating" class="regen-banner">
+              <span>⚠ {{ regenerationStats.ruleBasedCount }}명의 Agent가 규칙 기반 기본값 사용 중 (LLM: {{ regenerationStats.llmCount }}/{{ regenerationStats.total }})</span>
+              <button class="btn-regen" @click="handleRegenerate">
+                재검토 ({{ regenerationStats.ruleBasedCount }}명)
+              </button>
+            </div>
+            <div v-if="isRegenerating" class="regen-banner regen-active">
+              <span>재검토 진행 중...</span>
+            </div>
+
             <!-- 시간 설정 -->
             <div class="config-block">
               <div class="config-grid">
@@ -200,6 +211,9 @@
                     <div class="agent-tags">
                       <span class="agent-type">{{ agent.entity_type }}</span>
                       <span class="agent-stance" :class="'stance-' + agent.stance">{{ agent.stance }}</span>
+                      <span :class="agent.generation_source === 'rule_based' ? 'badge-rule' : 'badge-llm'">
+                        {{ agent.generation_source === 'rule_based' ? '규칙' : 'LLM' }}
+                      </span>
                     </div>
                   </div>
                   
@@ -633,12 +647,14 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { 
-  prepareSimulation, 
-  getPrepareStatus, 
+import {
+  prepareSimulation,
+  getPrepareStatus,
+  getSimulation,
   getSimulationProfilesRealtime,
   getSimulationConfig,
-  getSimulationConfigRealtime 
+  getSimulationConfigRealtime,
+  regenerateConfig
 } from '../api/simulation'
 
 const props = defineProps({
@@ -671,6 +687,25 @@ let lastLoggedConfigStage = ''
 // 시뮬레이션 라운드 설정
 const useCustomRounds = ref(false) // 기본: 자동 라운드 사용
 const customMaxRounds = ref(40)   // 기본 권장: 40회
+
+// 재검토 상태
+const isRegenerating = ref(false)
+
+// 규칙 기반 Agent 재검토 통계
+const regenerationStats = computed(() => {
+  if (!simulationConfig.value?.agent_configs) return null
+  const agents = simulationConfig.value.agent_configs
+  const ruleBased = agents.filter(a => a.generation_source === 'rule_based')
+  const emptyEvents = !simulationConfig.value.event_config?.hot_topics?.length
+    && !simulationConfig.value.event_config?.initial_posts?.length
+  return {
+    total: agents.length,
+    ruleBasedCount: ruleBased.length,
+    llmCount: agents.length - ruleBased.length,
+    hasEmptyEvents: emptyEvents || simulationConfig.value.event_config?.generation_source === 'rule_based',
+    needsRegeneration: ruleBased.length > 0 || emptyEvents
+  }
+})
 
 // Watch stage to update phase
 watch(currentStage, (newStage) => {
@@ -759,6 +794,28 @@ const truncateBio = (bio) => {
     return bio.substring(0, 80) + '...'
   }
   return bio
+}
+
+const handleRegenerate = async () => {
+  if (!props.simulationId || isRegenerating.value) return
+  isRegenerating.value = true
+  addLog('규칙 기반 Agent 설정 재검토를 시작합니다...')
+  try {
+    const res = await regenerateConfig(props.simulationId, {
+      regenerate_events: regenerationStats.value?.hasEmptyEvents
+    })
+    if (res.success && res.data) {
+      addLog(`재검토 완료: ${res.data.regenerated_agents}명 재생성, ${res.data.still_rule_based}명 여전히 규칙 기반`)
+      // Reload config
+      await fetchConfigRealtime()
+    } else {
+      addLog(`재검토 실패: ${res.error || '알 수 없는 오류'}`)
+    }
+  } catch (err) {
+    addLog(`재검토 실패: ${err.message}`)
+  } finally {
+    isRegenerating.value = false
+  }
 }
 
 const selectProfile = (profile) => {
@@ -1065,10 +1122,32 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
-onMounted(() => {
-  // 준비 흐름 자동 시작
+onMounted(async () => {
+  // 시뮬레이션 상태 확인 후 조건부 prepare
   if (props.simulationId) {
     addLog('Step2 환경 구성 초기화')
+    try {
+      const res = await getSimulation(props.simulationId)
+      const status = res?.data?.status || res?.status
+      const readyStatuses = ['ready', 'running', 'completed', 'stopped', 'paused']
+      if (readyStatuses.includes(status)) {
+        addLog(`현재 상태: ${status} — prepare 생략, 기존 데이터 로드`)
+        phase.value = 1
+        emit('update-status', 'processing')
+        await loadPreparedData()
+        return
+      }
+      if (status === 'preparing') {
+        addLog(`현재 상태: preparing — 진행 중인 작업에 연결`)
+        phase.value = 1
+        emit('update-status', 'processing')
+        startPolling()
+        startProfilesPolling()
+        return
+      }
+    } catch (e) {
+      // 상태 확인 실패 시 prepare 진행
+    }
     startPrepareSimulation()
   }
 })
@@ -2598,5 +2677,52 @@ onUnmounted(() => {
 .modal-leave-to .profile-modal {
   transform: scale(0.95) translateY(10px);
   opacity: 0;
+}
+
+.regen-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: rgba(255, 170, 0, 0.1);
+  border: 1px solid rgba(255, 170, 0, 0.3);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #ffaa00;
+}
+.regen-active {
+  background: rgba(0, 170, 255, 0.1);
+  border-color: rgba(0, 170, 255, 0.3);
+  color: #00aaff;
+}
+.btn-regen {
+  padding: 4px 12px;
+  background: rgba(255, 170, 0, 0.2);
+  border: 1px solid rgba(255, 170, 0, 0.5);
+  border-radius: 4px;
+  color: #ffaa00;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.btn-regen:hover {
+  background: rgba(255, 170, 0, 0.3);
+}
+.badge-rule {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: rgba(255, 100, 0, 0.2);
+  color: #ff6400;
+}
+.badge-llm {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: rgba(0, 200, 100, 0.2);
+  color: #00c864;
 }
 </style>

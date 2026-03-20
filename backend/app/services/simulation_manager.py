@@ -7,6 +7,8 @@ Twitter/Reddit 양 플랫폼 병렬 시뮬레이션을 관리한다.
 import os
 import json
 import shutil
+import tempfile
+import threading
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -113,7 +115,7 @@ class SimulationState:
 
 class SimulationManager:
     """
-    시뮬레이션 매니저.
+    시뮬레이션 매니저 (싱글톤).
 
     핵심 기능:
     1. Zep 그래프에서 엔터티를 조회/필터링
@@ -121,19 +123,32 @@ class SimulationManager:
     3. LLM 기반 시뮬레이션 설정값 생성
     4. 사전 제공 스크립트 실행에 필요한 파일 준비
     """
-    
+
     # 시뮬레이션 데이터 저장 디렉터리
     SIMULATION_DATA_DIR = os.path.join(
-        os.path.dirname(__file__), 
+        os.path.dirname(__file__),
         '../../uploads/simulations'
     )
-    
+
+    _instance = None
+    _lock = threading.RLock()
+
+    def __new__(cls):
+        """싱글톤 패턴 — 모든 호출이 동일 인스턴스를 공유한다."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._simulations: Dict[str, SimulationState] = {}
+                    cls._instance._initialized = False
+        return cls._instance
+
     def __init__(self):
+        if self._initialized:
+            return
         # 디렉터리 보장
         os.makedirs(self.SIMULATION_DATA_DIR, exist_ok=True)
-        
-        # 메모리 상태 캐시
-        self._simulations: Dict[str, SimulationState] = {}
+        self._initialized = True
     
     def _get_simulation_dir(self, simulation_id: str) -> str:
         """시뮬레이션 데이터 디렉터리를 반환한다."""
@@ -142,16 +157,24 @@ class SimulationManager:
         return sim_dir
     
     def _save_simulation_state(self, state: SimulationState):
-        """시뮬레이션 상태를 파일에 저장한다."""
-        sim_dir = self._get_simulation_dir(state.simulation_id)
-        state_file = os.path.join(sim_dir, "state.json")
-        
-        state.updated_at = datetime.now().isoformat()
-        
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
-        
-        self._simulations[state.simulation_id] = state
+        """시뮬레이션 상태를 파일에 저장한다 (atomic write + lock)."""
+        with self._lock:
+            sim_dir = self._get_simulation_dir(state.simulation_id)
+            state_file = os.path.join(sim_dir, "state.json")
+
+            state.updated_at = datetime.now().isoformat()
+
+            fd, tmp_path = tempfile.mkstemp(suffix='.tmp', dir=sim_dir)
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, state_file)
+            except BaseException:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
+
+            self._simulations[state.simulation_id] = state
     
     def _load_simulation_state(self, simulation_id: str) -> Optional[SimulationState]:
         """파일에서 시뮬레이션 상태를 불러온다."""
@@ -234,7 +257,8 @@ class SimulationManager:
         defined_entity_types: Optional[List[str]] = None,
         use_llm_for_profiles: bool = True,
         progress_callback: Optional[callable] = None,
-        parallel_profile_count: int = 3
+        parallel_profile_count: int = 3,
+        force_regenerate: bool = False,
     ) -> SimulationState:
         """
         시뮬레이션 환경을 자동으로 준비한다.
@@ -299,85 +323,137 @@ class SimulationManager:
                 self._save_simulation_state(state)
                 return state
             
-            # ========== 2단계: Agent Profile 생성 ==========
-            total_entities = len(filtered.entities)
-            
-            if progress_callback:
-                progress_callback(
-                    "generating_profiles", 0, 
-                    "생성을 시작합니다...",
-                    current=0,
-                    total=total_entities
-                )
-            
-            # graph_id를 전달해 Zep 검색 컨텍스트를 활성화
-            generator = OasisProfileGenerator(graph_id=state.graph_id)
-            
-            def profile_progress(current, total, msg):
+            # ========== 2단계: Agent Profile 생성 (캐시 확인) ==========
+            profiles_loaded = False
+            profiles = []
+
+            if not force_regenerate:
+                reddit_path = os.path.join(sim_dir, "reddit_profiles.json")
+                twitter_path = os.path.join(sim_dir, "twitter_profiles.csv")
+
+                # 활성 플랫폼의 프로필 파일이 존재하면 확인
+                existing_count = 0
+                if state.enable_reddit and os.path.exists(reddit_path):
+                    try:
+                        with open(reddit_path, 'r', encoding='utf-8') as f:
+                            existing_count = len(json.load(f))
+                    except Exception:
+                        existing_count = 0
+                elif state.enable_twitter and os.path.exists(twitter_path):
+                    try:
+                        import csv
+                        with open(twitter_path, 'r', encoding='utf-8') as f:
+                            existing_count = sum(1 for _ in csv.DictReader(f))
+                    except Exception:
+                        existing_count = 0
+
+                total_entities = len(filtered.entities)
+
+                # 전체 완료 시에만 재사용, 부분 완료는 resume로 진행
+                if existing_count > 0 and existing_count >= total_entities:
+                    logger.info(f"기존 프로필 완료 확인 ({existing_count}/{total_entities}), 재사용합니다.")
+                    if state.enable_reddit and os.path.exists(reddit_path):
+                        with open(reddit_path, 'r', encoding='utf-8') as f:
+                            profiles = json.load(f)
+                    elif state.enable_twitter and os.path.exists(twitter_path):
+                        import csv
+                        with open(twitter_path, 'r', encoding='utf-8') as f:
+                            reader = csv.DictReader(f)
+                            profiles = list(reader)
+
+                    profiles_count = len(profiles)
+                    state.profiles_count = profiles_count
+
+                    if progress_callback:
+                        progress_callback(
+                            "generating_profiles", 100,
+                            f"기존 프로필 재사용, 총 {profiles_count}개 Profile",
+                            current=profiles_count,
+                            total=profiles_count
+                        )
+                    profiles_loaded = True
+                elif existing_count > 0:
+                    logger.info(f"기존 프로필 부분 완료 ({existing_count}/{total_entities}), 이어서 생성합니다.")
+
+            if not profiles_loaded:
+                total_entities = len(filtered.entities)
+
                 if progress_callback:
                     progress_callback(
-                        "generating_profiles", 
-                        int(current / total * 100), 
-                        msg,
-                        current=current,
-                        total=total,
-                        item_name=msg
+                        "generating_profiles", 0,
+                        "생성을 시작합니다...",
+                        current=0,
+                        total=total_entities
                     )
-            
-            # 실시간 저장 경로 설정(기본 우선순위: Reddit JSON)
-            realtime_output_path = None
-            realtime_platform = "reddit"
-            if state.enable_reddit:
-                realtime_output_path = os.path.join(sim_dir, "reddit_profiles.json")
+
+                # graph_id를 전달해 Zep 검색 컨텍스트를 활성화
+                generator = OasisProfileGenerator(graph_id=state.graph_id)
+
+                def profile_progress(current, total, msg):
+                    if progress_callback:
+                        progress_callback(
+                            "generating_profiles",
+                            int(current / total * 100),
+                            msg,
+                            current=current,
+                            total=total,
+                            item_name=msg
+                        )
+
+                # 실시간 저장 경로 설정(기본 우선순위: Reddit JSON)
+                realtime_output_path = None
                 realtime_platform = "reddit"
-            elif state.enable_twitter:
-                realtime_output_path = os.path.join(sim_dir, "twitter_profiles.csv")
-                realtime_platform = "twitter"
-            
-            profiles = generator.generate_profiles_from_entities(
-                entities=filtered.entities,
-                use_llm=use_llm_for_profiles,
-                progress_callback=profile_progress,
-                graph_id=state.graph_id,  # Zep 검색용 graph_id
-                parallel_count=parallel_profile_count,  # 병렬 생성 수
-                realtime_output_path=realtime_output_path,  # 실시간 저장 경로
-                output_platform=realtime_platform  # 출력 형식
-            )
-            
-            state.profiles_count = len(profiles)
-            
-            # Profile 파일 저장(Twitter=CSV, Reddit=JSON)
-            # Reddit은 생성 중에도 저장되지만 완전성을 위해 한 번 더 저장
-            if progress_callback:
-                progress_callback(
-                    "generating_profiles", 95, 
-                    "Profile 파일 저장 중...",
-                    current=total_entities,
-                    total=total_entities
+                if state.enable_reddit:
+                    realtime_output_path = os.path.join(sim_dir, "reddit_profiles.json")
+                    realtime_platform = "reddit"
+                elif state.enable_twitter:
+                    realtime_output_path = os.path.join(sim_dir, "twitter_profiles.csv")
+                    realtime_platform = "twitter"
+
+                profiles = generator.generate_profiles_from_entities(
+                    entities=filtered.entities,
+                    use_llm=use_llm_for_profiles,
+                    progress_callback=profile_progress,
+                    graph_id=state.graph_id,  # Zep 검색용 graph_id
+                    parallel_count=parallel_profile_count,  # 병렬 생성 수
+                    realtime_output_path=realtime_output_path,  # 실시간 저장 경로
+                    output_platform=realtime_platform  # 출력 형식
                 )
-            
-            if state.enable_reddit:
-                generator.save_profiles(
-                    profiles=profiles,
-                    file_path=os.path.join(sim_dir, "reddit_profiles.json"),
-                    platform="reddit"
-                )
-            
-            if state.enable_twitter:
-                # Twitter는 CSV 형식 필수(OASIS 요구사항)
-                generator.save_profiles(
-                    profiles=profiles,
-                    file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
-                    platform="twitter"
-                )
-            
-            if progress_callback:
-                progress_callback(
-                    "generating_profiles", 100, 
-                    f"완료, 총 {len(profiles)}개 Profile",
-                    current=len(profiles),
-                    total=len(profiles)
-                )
+
+                state.profiles_count = len(profiles)
+
+                # Profile 파일 저장(Twitter=CSV, Reddit=JSON)
+                # Reddit은 생성 중에도 저장되지만 완전성을 위해 한 번 더 저장
+                if progress_callback:
+                    progress_callback(
+                        "generating_profiles", 95,
+                        "Profile 파일 저장 중...",
+                        current=total_entities,
+                        total=total_entities
+                    )
+
+                if state.enable_reddit:
+                    generator.save_profiles(
+                        profiles=profiles,
+                        file_path=os.path.join(sim_dir, "reddit_profiles.json"),
+                        platform="reddit"
+                    )
+
+                if state.enable_twitter:
+                    # Twitter는 CSV 형식 필수(OASIS 요구사항)
+                    generator.save_profiles(
+                        profiles=profiles,
+                        file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
+                        platform="twitter"
+                    )
+
+                if progress_callback:
+                    progress_callback(
+                        "generating_profiles", 100,
+                        f"완료, 총 {len(profiles)}개 Profile",
+                        current=len(profiles),
+                        total=len(profiles)
+                    )
             
             # ========== 3단계: LLM 기반 설정 생성 ==========
             if progress_callback:
@@ -502,6 +578,16 @@ class SimulationManager:
         with open(config_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     
+    def delete_simulation(self, simulation_id: str) -> bool:
+        """시뮬레이션 데이터 디렉터리를 삭제한다."""
+        import shutil
+        sim_dir = os.path.join(self.SIMULATION_DATA_DIR, simulation_id)
+        if not os.path.exists(sim_dir):
+            return False
+        shutil.rmtree(sim_dir)
+        self._simulations.pop(simulation_id, None)
+        return True
+
     def get_run_instructions(self, simulation_id: str) -> Dict[str, str]:
         """실행 안내를 반환한다."""
         sim_dir = self._get_simulation_dir(simulation_id)

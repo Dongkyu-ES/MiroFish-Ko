@@ -49,6 +49,18 @@ class Config:
         os.path.join(os.path.dirname(__file__), '../uploads/codex_tasks')
     )
     
+    # Claude CLI 폴백 설정 (Codex CLI 레이트리밋 시 2차 폴백)
+    CLAUDE_FALLBACK_ENABLED = os.environ.get('CLAUDE_FALLBACK_ENABLED', 'false').lower() == 'true'
+    CLAUDE_PRIMARY = os.environ.get('CLAUDE_PRIMARY', 'false').lower() == 'true'
+    CLAUDE_BIN = os.environ.get('CLAUDE_BIN', 'claude')
+    CLAUDE_MODEL_REASONING = os.environ.get('CLAUDE_MODEL_REASONING', 'claude-opus-4-6')
+    CLAUDE_MODEL_FAST = os.environ.get('CLAUDE_MODEL_FAST', 'claude-haiku-4-5')
+    CLAUDE_TIMEOUT_SEC = int(os.environ.get('CLAUDE_TIMEOUT_SEC', '120'))
+
+    # OASIS 시뮬레이션 모델 폴백 설정 (camel-ai 직접 호출)
+    OASIS_FALLBACK_ENABLED = os.environ.get('OASIS_FALLBACK_ENABLED', 'true').lower() == 'true'
+    OASIS_FALLBACK_MODEL = os.environ.get('OASIS_FALLBACK_MODEL', 'claude-haiku-4-5')
+
     # Zep 설정
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
     

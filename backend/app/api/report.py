@@ -10,7 +10,7 @@ from flask import request, jsonify, send_file
 
 from . import report_bp
 from ..config import Config
-from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
+from ..services.report_agent import Report, ReportAgent, ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager
 from ..models.project import ProjectManager
 from ..models.task import TaskManager, TaskStatus
@@ -68,18 +68,19 @@ def generate_report():
                 "error": f"시뮬레이션이 존재하지 않습니다: {simulation_id}"
             }), 404
         
-        # 보고서
+        # 보고서 (COMPLETED 또는 GENERATING 상태면 중복 생성 방지)
         if not force_regenerate:
             existing_report = ReportManager.get_report_by_simulation(simulation_id)
-            if existing_report and existing_report.status == ReportStatus.COMPLETED:
+            if existing_report and existing_report.status in [ReportStatus.COMPLETED, ReportStatus.GENERATING]:
                 return jsonify({
                     "success": True,
                     "data": {
                         "simulation_id": simulation_id,
                         "report_id": existing_report.report_id,
-                        "status": "completed",
-                        "message": "보고서",
-                        "already_generated": True
+                        "status": existing_report.status.value,
+                        "message": "보고서" if existing_report.status == ReportStatus.COMPLETED else "보고서 생성 중",
+                        "already_generated": existing_report.status == ReportStatus.COMPLETED,
+                        "already_generating": existing_report.status == ReportStatus.GENERATING
                     }
                 })
         
@@ -107,8 +108,18 @@ def generate_report():
         
         # 생성 report_id, 반환
         import uuid
+        from datetime import datetime
         report_id = f"report_{uuid.uuid4().hex[:12]}"
-        
+
+        # GENERATING stub 저장 (중복 생성 방지 — 스레드 시작 전에 먼저 저장)
+        stub_report = Report(
+            report_id=report_id,
+            simulation_id=simulation_id,
+            status=ReportStatus.GENERATING,
+            created_at=datetime.now().isoformat(),
+        )
+        ReportManager.save_report(stub_report)
+
         # 작업
         task_manager = TaskManager()
         task_id = task_manager.create_task(

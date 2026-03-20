@@ -106,7 +106,7 @@ def test_simulation_config_generator_uses_codex_runtime_metadata():
     
     generator = SimulationConfigGenerator(llm_client=fake_llm_client)
     
-    assert generator._get_runtime_llm_model() == 'gpt-5.3-codex-spark'
+    assert generator._get_runtime_llm_model() == 'gpt-5.4-mini'
     assert generator._get_runtime_llm_base() == 'codex_cli'
 
 

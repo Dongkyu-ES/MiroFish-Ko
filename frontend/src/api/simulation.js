@@ -184,3 +184,23 @@ export const interviewAgents = (data) => {
 export const getSimulationHistory = (limit = 20) => {
   return service.get('/api/simulation/history', { params: { limit } })
 }
+
+/**
+ * 시뮬레이션 및 연관 데이터 삭제 (cascade)
+ * @param {string} simulationId
+ */
+export const deleteSimulation = (simulationId) => {
+  return service.delete(`/api/simulation/${simulationId}`)
+}
+
+/**
+ * 규칙 기반 Agent 설정 재검토(재생성)
+ * @param {string} simulationId
+ * @param {Object} data - { regenerate_events? }
+ */
+export const regenerateConfig = (simulationId, data = {}) => {
+  return requestWithRetry(
+    () => service.post(`/api/simulation/${simulationId}/config/regenerate`, data),
+    3, 1000
+  )
+}

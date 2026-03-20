@@ -215,13 +215,29 @@ def create_simulation():
             }), 400
         
         manager = SimulationManager()
-        state = manager.create_simulation(
-            project_id=project_id,
-            graph_id=graph_id,
-            enable_twitter=data.get('enable_twitter', True),
-            enable_reddit=data.get('enable_reddit', True),
-        )
-        
+
+        # 중복 시뮬레이션 방지: 같은 프로젝트에 active 시뮬레이션이 있으면 반환
+        terminal_statuses = {
+            SimulationStatus.COMPLETED, SimulationStatus.FAILED, SimulationStatus.STOPPED
+        }
+        with manager._lock:
+            existing = manager.list_simulations(project_id=project_id)
+            active = [s for s in existing if s.status not in terminal_statuses]
+            if active:
+                logger.info(f"프로젝트 {project_id}에 활성 시뮬레이션 존재: {active[0].simulation_id}")
+                return jsonify({
+                    "success": True,
+                    "data": active[0].to_dict(),
+                    "already_exists": True
+                })
+
+            state = manager.create_simulation(
+                project_id=project_id,
+                graph_id=graph_id,
+                enable_twitter=data.get('enable_twitter', True),
+                enable_reddit=data.get('enable_reddit', True),
+            )
+
         return jsonify({
             "success": True,
             "data": state.to_dict()
@@ -400,49 +416,77 @@ def prepare_simulation():
     import os
     from ..models.task import TaskManager, TaskStatus
     from ..config import Config
-    
+
     try:
         data = request.get_json() or {}
-        
+
         simulation_id = data.get('simulation_id')
         if not simulation_id:
             return jsonify({
                 "success": False,
                 "error": "simulation_id를 입력해 주세요."
             }), 400
-        
+
         manager = SimulationManager()
         state = manager.get_simulation(simulation_id)
-        
+
         if not state:
             return jsonify({
                 "success": False,
                 "error": f"시뮬레이션이 존재하지 않습니다: {simulation_id}"
             }), 404
-        
+
         # 생성
         force_regenerate = data.get('force_regenerate', False)
         logger.info(f"시작 /prepare 요청: simulation_id={simulation_id}, force_regenerate={force_regenerate}")
-        
-        # 완료(생성)
-        if not force_regenerate:
-            logger.debug(f"시뮬레이션 {simulation_id} 완료...")
-            is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
-            logger.debug(f": is_prepared={is_prepared}, prepare_info={prepare_info}")
-            if is_prepared:
-                logger.info(f"시뮬레이션 {simulation_id} 완료, 생성")
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "simulation_id": simulation_id,
-                        "status": "ready",
-                        "message": "완료, 생성",
-                        "already_prepared": True,
-                        "prepare_info": prepare_info
-                    }
-                })
-            else:
-                logger.info(f"시뮬레이션 {simulation_id} 완료, 시작작업")
+
+        # 중복 prepare 방지: atomic check-and-set (TOCTOU 해소)
+        with manager._lock:
+            # 최신 상태를 파일에서 다시 읽기 (캐시 무효화)
+            state = manager._load_simulation_state(simulation_id)
+            if state.status == SimulationStatus.PREPARING:
+                # stale 감지: 10분 이상 업데이트 없으면 stuck으로 판단하고 재시작 허용
+                from datetime import datetime, timedelta
+                stale = False
+                try:
+                    updated = datetime.fromisoformat(state.updated_at)
+                    if datetime.now() - updated > timedelta(minutes=10):
+                        stale = True
+                        logger.warning(f"시뮬레이션 {simulation_id} PREPARING 상태 10분+ 경과, stale로 판단하여 재시작 허용")
+                except Exception:
+                    stale = True
+
+                if not stale:
+                    logger.info(f"시뮬레이션 {simulation_id} 이미 prepare 진행 중, 중복 요청 무시")
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "simulation_id": simulation_id,
+                            "status": "preparing",
+                            "message": "이미 준비 작업이 진행 중입니다.",
+                            "already_preparing": True
+                        }
+                    })
+
+            # lock 안에서 완료 여부 확인 + PREPARING 즉시 설정 (TOCTOU 해소)
+            if not force_regenerate:
+                is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
+                if is_prepared:
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "simulation_id": simulation_id,
+                            "status": "ready",
+                            "message": "완료, 생성",
+                            "already_prepared": True,
+                            "prepare_info": prepare_info
+                        }
+                    })
+
+            # PREPARING 상태 즉시 설정 (lock 안에서 atomic)
+            state.status = SimulationStatus.PREPARING
+            manager._save_simulation_state(state)
+            logger.info(f"시뮬레이션 {simulation_id} PREPARING 상태 설정 완료 (atomic)")
         
         # 프로젝트정보
         project = ProjectManager.get_project(state.project_id)
@@ -496,9 +540,7 @@ def prepare_simulation():
             }
         )
         
-        # 시뮬레이션상태(엔터티)
-        state.status = SimulationStatus.PREPARING
-        manager._save_simulation_state(state)
+        # PREPARING 상태는 이미 lock 안에서 설정됨 (TOCTOU 해소)
         
         # 작업
         def run_prepare():
@@ -582,7 +624,8 @@ def prepare_simulation():
                     defined_entity_types=entity_types_list,
                     use_llm_for_profiles=use_llm_for_profiles,
                     progress_callback=progress_callback,
-                    parallel_profile_count=parallel_profile_count
+                    parallel_profile_count=parallel_profile_count,
+                    force_regenerate=force_regenerate,
                 )
                 
                 # 작업완료
@@ -982,6 +1025,51 @@ def get_simulation_history():
         }), 500
 
 
+@simulation_bp.route('/<simulation_id>', methods=['DELETE'])
+def delete_simulation_cascade(simulation_id: str):
+    """
+    시뮬레이션 및 연관 데이터를 모두 삭제한다.
+    cascade: 시뮬레이션 → 리포트 → 프로젝트 → 로컬 그래프
+    """
+    try:
+        sim_manager = SimulationManager()
+        state = sim_manager._load_simulation_state(simulation_id)
+        if not state:
+            return jsonify({"success": False, "error": "시뮬레이션을 찾을 수 없습니다."}), 404
+
+        deleted = {"simulation": False, "project": False, "report": False, "graph": False}
+
+        # 1) 리포트 삭제
+        report_id = _get_report_id_for_simulation(simulation_id)
+        if report_id:
+            from ..services.report_agent import ReportManager
+            deleted["report"] = ReportManager.delete_report(report_id)
+
+        # 2) 시뮬레이션 삭제
+        deleted["simulation"] = sim_manager.delete_simulation(simulation_id)
+
+        # 3) 프로젝트 삭제
+        if state.project_id:
+            deleted["project"] = ProjectManager.delete_project(state.project_id)
+
+        # 4) 로컬 그래프 삭제
+        if state.graph_id and state.graph_id.startswith("local_"):
+            try:
+                from ..services.local_graph_repository import LocalGraphRepository
+                repo = LocalGraphRepository()
+                repo.delete_graph(state.graph_id)
+                deleted["graph"] = True
+            except Exception:
+                pass
+
+        logger.info(f"시뮬레이션 삭제 완료: {simulation_id}, 결과={deleted}")
+        return jsonify({"success": True, "deleted": deleted})
+
+    except Exception as e:
+        logger.error(f"시뮬레이션 삭제 실패: {simulation_id}, error={e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @simulation_bp.route('/<simulation_id>/profiles', methods=['GET'])
 def get_simulation_profiles(simulation_id: str):
     """
@@ -1130,6 +1218,183 @@ def get_simulation_profiles_realtime(simulation_id: str):
         }), 500
 
 
+@simulation_bp.route('/<simulation_id>/config/regenerate', methods=['POST'])
+def regenerate_simulation_config(simulation_id: str):
+    """
+    규칙 기반(rule_based)으로 생성된 에이전트/이벤트 설정을 LLM으로 재생성한다.
+
+    요청(JSON):
+        {
+            "simulation_requirement": "...",  // 선택, 없으면 기존 값 사용
+            "document_text": ""               // 선택
+        }
+
+    반환:
+        {
+            "success": true,
+            "data": {
+                "simulation_id": "sim_xxxx",
+                "regenerated_agents": 5,
+                "still_rule_based": 0,
+                "events_regenerated": false
+            }
+        }
+    """
+    import json as _json
+    from ..services.simulation_config_generator import SimulationConfigGenerator, SimulationParameters, AgentActivityConfig, EventConfig, TimeSimulationConfig, PlatformConfig
+
+    try:
+        data = request.get_json() or {}
+
+        sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+        if not os.path.exists(sim_dir):
+            return jsonify({
+                "success": False,
+                "error": f"시뮬레이션이 존재하지 않습니다: {simulation_id}"
+            }), 404
+
+        config_file = os.path.join(sim_dir, "simulation_config.json")
+        if not os.path.exists(config_file):
+            return jsonify({
+                "success": False,
+                "error": "simulation_config.json이 없습니다. /prepare를 먼저 실행해 주세요."
+            }), 404
+
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config_dict = _json.load(f)
+
+        # 규칙 기반 에이전트 수 확인
+        agent_configs_raw = config_dict.get("agent_configs", [])
+        rule_based_count = sum(
+            1 for a in agent_configs_raw
+            if a.get("generation_source", "llm") == "rule_based"
+        )
+        event_rule_based = config_dict.get("event_config", {}).get("generation_source", "llm") == "rule_based"
+
+        if rule_based_count == 0 and not event_rule_based:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "simulation_id": simulation_id,
+                    "regenerated_agents": 0,
+                    "still_rule_based": 0,
+                    "events_regenerated": False,
+                    "message": "재생성할 규칙 기반 설정이 없습니다."
+                }
+            })
+
+        # 엔터티 로드
+        graph_id = config_dict.get("graph_id", "")
+        reader = ZepEntityReader()
+        filtered = reader.filter_defined_entities(
+            graph_id=graph_id,
+            defined_entity_types=None,
+            enrich_with_edges=True
+        )
+        entities = filtered.entities
+
+        # SimulationParameters 복원
+        from dataclasses import field as dc_field
+        from datetime import datetime as _dt
+
+        def _load_agent_config(a):
+            return AgentActivityConfig(
+                agent_id=a.get("agent_id", 0),
+                entity_uuid=a.get("entity_uuid", ""),
+                entity_name=a.get("entity_name", ""),
+                entity_type=a.get("entity_type", "Unknown"),
+                activity_level=a.get("activity_level", 0.5),
+                posts_per_hour=a.get("posts_per_hour", 0.5),
+                comments_per_hour=a.get("comments_per_hour", 1.0),
+                active_hours=a.get("active_hours", list(range(9, 23))),
+                response_delay_min=a.get("response_delay_min", 5),
+                response_delay_max=a.get("response_delay_max", 60),
+                sentiment_bias=a.get("sentiment_bias", 0.0),
+                stance=a.get("stance", "neutral"),
+                influence_weight=a.get("influence_weight", 1.0),
+                generation_source=a.get("generation_source", "llm")
+            )
+
+        ev = config_dict.get("event_config", {})
+        event_config = EventConfig(
+            initial_posts=ev.get("initial_posts", []),
+            scheduled_events=ev.get("scheduled_events", []),
+            hot_topics=ev.get("hot_topics", []),
+            narrative_direction=ev.get("narrative_direction", ""),
+            generation_source=ev.get("generation_source", "llm")
+        )
+
+        tc = config_dict.get("time_config", {})
+        time_config = TimeSimulationConfig(
+            total_simulation_hours=tc.get("total_simulation_hours", 72),
+            minutes_per_round=tc.get("minutes_per_round", 60),
+            agents_per_hour_min=tc.get("agents_per_hour_min", 5),
+            agents_per_hour_max=tc.get("agents_per_hour_max", 20),
+            peak_hours=tc.get("peak_hours", [19, 20, 21, 22]),
+            peak_activity_multiplier=tc.get("peak_activity_multiplier", 1.5),
+            off_peak_hours=tc.get("off_peak_hours", [0, 1, 2, 3, 4, 5]),
+            off_peak_activity_multiplier=tc.get("off_peak_activity_multiplier", 0.05),
+            morning_hours=tc.get("morning_hours", [6, 7, 8]),
+            morning_activity_multiplier=tc.get("morning_activity_multiplier", 0.4),
+            work_hours=tc.get("work_hours", list(range(9, 19))),
+            work_activity_multiplier=tc.get("work_activity_multiplier", 0.7),
+        )
+
+        tw = config_dict.get("twitter_config")
+        reddit = config_dict.get("reddit_config")
+        twitter_config = PlatformConfig(**tw) if tw else None
+        reddit_config = PlatformConfig(**reddit) if reddit else None
+
+        params = SimulationParameters(
+            simulation_id=simulation_id,
+            project_id=config_dict.get("project_id", ""),
+            graph_id=graph_id,
+            simulation_requirement=config_dict.get("simulation_requirement", ""),
+            time_config=time_config,
+            agent_configs=[_load_agent_config(a) for a in agent_configs_raw],
+            event_config=event_config,
+            twitter_config=twitter_config,
+            reddit_config=reddit_config,
+            llm_model=config_dict.get("llm_model", ""),
+            llm_base_url=config_dict.get("llm_base_url", ""),
+            generated_at=config_dict.get("generated_at", _dt.now().isoformat()),
+            generation_reasoning=config_dict.get("generation_reasoning", ""),
+        )
+
+        simulation_requirement = data.get("simulation_requirement") or params.simulation_requirement
+        document_text = data.get("document_text", "")
+
+        generator = SimulationConfigGenerator()
+        updated_params, stats = generator.regenerate_rule_based_configs(
+            params=params,
+            entities=entities,
+            document_text=document_text,
+            simulation_requirement=simulation_requirement,
+        )
+
+        # 저장
+        with open(config_file, 'w', encoding='utf-8') as f:
+            f.write(updated_params.to_json())
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "regenerated_agents": stats["regenerated_agents"],
+                "still_rule_based": stats["still_rule_based"],
+                "events_regenerated": stats["events_regenerated"],
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Config 재생성 실패: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
 @simulation_bp.route('/<simulation_id>/config/realtime', methods=['GET'])
 def get_simulation_config_realtime(simulation_id: str):
     """
@@ -1225,8 +1490,14 @@ def get_simulation_config_realtime(simulation_id: str):
         
         # 설정, 핵심정보
         if config:
+            agent_configs = config.get("agent_configs", [])
+            rule_based_count = sum(
+                1 for a in agent_configs
+                if a.get("generation_source", "llm") == "rule_based"
+            )
             response_data["summary"] = {
-                "total_agents": len(config.get("agent_configs", [])),
+                "total_agents": len(agent_configs),
+                "rule_based_count": rule_based_count,
                 "simulation_hours": config.get("time_config", {}).get("total_simulation_hours"),
                 "initial_posts_count": len(config.get("event_config", {}).get("initial_posts", [])),
                 "hot_topics_count": len(config.get("event_config", {}).get("hot_topics", [])),
@@ -1540,13 +1811,19 @@ def start_simulation():
             if is_prepared:
                 # 완료, 실행 중
                 if state.status == SimulationStatus.RUNNING:
-                    # 시뮬레이션 실행
                     run_state = SimulationRunner.get_run_state(simulation_id)
-                    if run_state and run_state.runner_status.value == "running":
-                        # 실행
+                    runner_status = run_state.runner_status.value if run_state else None
+
+                    # STARTING 상태는 force여도 거부 (stop 불가)
+                    if runner_status == "starting":
+                        return jsonify({
+                            "success": False,
+                            "error": "시뮬레이션이 시작 중입니다. 잠시 후 다시 시도해 주세요."
+                        }), 400
+
+                    if runner_status == "running":
                         if force:
-                            # :중지실행진행 중레이션
-                            logger.info(f":중지실행진행 중레이션 {simulation_id}")
+                            logger.info(f"force 모드: 실행 중 시뮬레이션 중지 후 재시작 {simulation_id}")
                             try:
                                 SimulationRunner.stop_simulation(simulation_id)
                             except Exception as e:

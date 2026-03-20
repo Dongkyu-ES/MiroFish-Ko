@@ -29,24 +29,32 @@
         @mouseleave="hoveringCard = null"
         @click="navigateToProject(project)"
       >
-        
+
         <div class="card-header">
           <span class="card-id">{{ formatSimulationId(project.simulation_id) }}</span>
-          <div class="card-status-icons">
-            <span 
-              class="status-icon" 
-              :class="{ available: project.project_id, unavailable: !project.project_id }"
-              title="그래프 구축"
-            >◇</span>
-            <span 
-              class="status-icon available" 
-              title="환경 구성"
-            >◈</span>
-            <span 
-              class="status-icon" 
-              :class="{ available: project.report_id, unavailable: !project.report_id }"
-              title="분석 보고서"
-            >◆</span>
+          <div class="card-header-right">
+            <div class="card-status-icons">
+              <span
+                class="status-icon"
+                :class="{ available: project.project_id, unavailable: !project.project_id }"
+                title="그래프 구축"
+              >◇</span>
+              <span
+                class="status-icon available"
+                title="환경 구성"
+              >◈</span>
+              <span
+                class="status-icon"
+                :class="{ available: project.report_id, unavailable: !project.report_id }"
+                title="분석 보고서"
+              >◆</span>
+            </div>
+            <button
+              class="card-delete-btn"
+              :class="{ confirming: deletingIndex === index }"
+              :title="deletingIndex === index ? '한 번 더 클릭하면 삭제' : '삭제'"
+              @click.stop="confirmDelete(project, index)"
+            >{{ deletingIndex === index ? '?' : '×' }}</button>
           </div>
         </div>
 
@@ -193,7 +201,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getSimulationHistory } from '../api/simulation'
+import { getSimulationHistory, deleteSimulation } from '../api/simulation'
 
 const router = useRouter()
 const route = useRoute()
@@ -434,6 +442,28 @@ const goToReport = () => {
   }
 }
 
+
+const deletingIndex = ref(null)
+
+const confirmDelete = async (project, index) => {
+  if (deletingIndex.value === index) {
+    // 두 번째 클릭: 실제 삭제 실행
+    try {
+      await deleteSimulation(project.simulation_id)
+      projects.value.splice(index, 1)
+    } catch (error) {
+      console.error('삭제 실패:', error)
+    } finally {
+      deletingIndex.value = null
+    }
+  } else {
+    // 첫 번째 클릭: 확인 상태로 전환
+    deletingIndex.value = index
+    setTimeout(() => {
+      if (deletingIndex.value === index) deletingIndex.value = null
+    }, 3000)
+  }
+}
 
 const loadHistory = async () => {
   try {
@@ -703,6 +733,52 @@ onUnmounted(() => {
   font-weight: 500;
 }
 
+.card-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-delete-btn {
+  width: 20px;
+  height: 20px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #D1D5DB;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  transition: all 0.2s ease;
+  opacity: 0;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.project-card:hover .card-delete-btn {
+  opacity: 1;
+}
+
+.card-delete-btn:hover {
+  color: #EF4444;
+  border-color: #EF4444;
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.card-delete-btn.confirming {
+  opacity: 1;
+  color: #FFFFFF;
+  background: #EF4444;
+  border-color: #EF4444;
+  animation: pulse-delete 1s infinite;
+}
+
+@keyframes pulse-delete {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
 
 .card-status-icons {
   display: flex;

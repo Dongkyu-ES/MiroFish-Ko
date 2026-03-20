@@ -20,6 +20,12 @@ from .logger import get_logger
 
 logger = get_logger('mirofish.codex_broker')
 
+RATE_LIMIT_PATTERNS = (
+    "usage limit",
+    "rate limit",
+    "hit your usage limit",
+)
+
 
 class CodexBroker:
     """Codex CLI 호출 래퍼."""
@@ -101,12 +107,18 @@ class CodexBroker:
             reasoning_effort=self.reasoning_effort,
             output_file=output_file,
         )
-        self._run_command(
+        self._run_command_with_fallback(
             command=command,
             prompt=prompt,
             task_dir=task_dir,
             timeout_sec=timeout_sec,
             output_file=output_file,
+            fallback_model="gpt-5.4-mini",
+            fallback_effort="low",
+            fallback_model_2="gpt-5-nano",
+            fallback_effort_2="low",
+            messages=messages,
+            expect_json=False,
         )
         return output_file.read_text(encoding='utf-8').strip()
     
@@ -144,12 +156,18 @@ class CodexBroker:
             output_file=output_file,
             schema_file=schema_file,
         )
-        self._run_command(
+        self._run_command_with_fallback(
             command=command,
             prompt=prompt,
             task_dir=task_dir,
             timeout_sec=timeout_sec,
             output_file=output_file,
+            fallback_model="gpt-5.4-mini",
+            fallback_effort="low",
+            fallback_model_2="gpt-5-nano",
+            fallback_effort_2="low",
+            messages=messages,
+            expect_json=True,
         )
         
         try:
@@ -188,10 +206,22 @@ class CodexBroker:
         command.append('-')
         return command
 
-    def _parse_json_output(self, raw_text: str) -> Dict[str, Any]:
-        cleaned = raw_text.strip()
+    @staticmethod
+    def _extract_json_from_text(text: str) -> str:
+        """텍스트에서 JSON 객체만 추출. 마크다운 펜스/설명문 제거."""
+        cleaned = text.strip()
+        # 마크다운 펜스 제거
         cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+        # 첫 번째 '{' 부터 마지막 '}' 까지 추출
+        first_brace = cleaned.find('{')
+        last_brace = cleaned.rfind('}')
+        if first_brace != -1 and last_brace > first_brace:
+            cleaned = cleaned[first_brace:last_brace + 1]
+        return cleaned
+
+    def _parse_json_output(self, raw_text: str) -> Dict[str, Any]:
+        cleaned = self._extract_json_from_text(raw_text)
         return json.loads(cleaned)
 
     def _repair_json_via_codex(self, raw_output: str, task_dir: Path, timeout_sec: int) -> str:
@@ -204,6 +234,20 @@ class CodexBroker:
         )
         repair_output = task_dir / 'result_repaired.json'
         (task_dir / 'repair_prompt.txt').write_text(repair_prompt, encoding='utf-8')
+
+        # Claude 우선 모드일 때 Claude로 repair 시도
+        if Config.CLAUDE_FALLBACK_ENABLED and getattr(Config, 'CLAUDE_PRIMARY', False):
+            try:
+                self._call_claude(
+                    prompt=repair_prompt,
+                    task_dir=task_dir,
+                    output_file=repair_output,
+                    model=Config.CLAUDE_MODEL_FAST,
+                )
+                return repair_output.read_text(encoding='utf-8')
+            except RuntimeError:
+                logger.warning("Claude repair 실패, Codex CLI로 폴백")
+
         command = self._build_base_command(
             model=self.json_model,
             reasoning_effort=self.json_reasoning_effort,
@@ -217,6 +261,158 @@ class CodexBroker:
             output_file=repair_output,
         )
         return repair_output.read_text(encoding='utf-8')
+
+    def _run_command_with_fallback(
+        self,
+        command: List[str],
+        prompt: str,
+        task_dir: Path,
+        timeout_sec: int,
+        output_file: Path,
+        fallback_model: Optional[str] = None,
+        fallback_effort: Optional[str] = None,
+        fallback_model_2: Optional[str] = None,
+        fallback_effort_2: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
+        expect_json: bool = False,
+    ) -> None:
+        # Claude 우선 모드: CLAUDE_FALLBACK_ENABLED + CLAUDE_PRIMARY
+        if Config.CLAUDE_FALLBACK_ENABLED and getattr(Config, 'CLAUDE_PRIMARY', False) and messages is not None:
+            logger.info("Claude 우선 모드 활성화, Claude CLI로 직접 호출")
+            fallback_prompt = self._messages_to_prompt(messages, expect_json=expect_json)
+            claude_model = Config.CLAUDE_MODEL_FAST if expect_json else Config.CLAUDE_MODEL_REASONING
+            try:
+                self._call_claude(
+                    prompt=fallback_prompt,
+                    task_dir=task_dir,
+                    output_file=output_file,
+                    model=claude_model,
+                )
+                return
+            except RuntimeError as claude_exc:
+                logger.warning("Claude 우선 호출 실패, Codex CLI로 폴백: %s", claude_exc)
+
+        # 1차: 기본 모델 (spark 요금제)
+        try:
+            self._run_command(
+                command=command,
+                prompt=prompt,
+                task_dir=task_dir,
+                timeout_sec=timeout_sec,
+                output_file=output_file,
+            )
+            return
+        except RuntimeError as exc:
+            error_text = str(exc).lower()
+            if not fallback_model or not any(p in error_text for p in RATE_LIMIT_PATTERNS):
+                raise
+
+            # 2차: 1차 폴백 모델 (일반 요금제)
+            logger.warning("Codex CLI 레이트리밋 감지, 1차 폴백 모델로 재시도: %s", fallback_model)
+            fb1_command = self._build_base_command(
+                model=fallback_model,
+                reasoning_effort=fallback_effort or self.json_reasoning_effort,
+                output_file=output_file,
+            )
+            try:
+                self._run_command(
+                    command=fb1_command,
+                    prompt=prompt,
+                    task_dir=task_dir,
+                    timeout_sec=timeout_sec,
+                    output_file=output_file,
+                )
+                return
+            except RuntimeError as fb1_exc:
+                # 3차: 2차 폴백 모델 (무료 요금제)
+                if fallback_model_2:
+                    logger.warning("Codex CLI 1차 폴백도 실패, 2차 폴백 모델로 재시도: %s", fallback_model_2)
+                    fb2_command = self._build_base_command(
+                        model=fallback_model_2,
+                        reasoning_effort=fallback_effort_2 or "low",
+                        output_file=output_file,
+                    )
+                    try:
+                        self._run_command(
+                            command=fb2_command,
+                            prompt=prompt,
+                            task_dir=task_dir,
+                            timeout_sec=timeout_sec,
+                            output_file=output_file,
+                        )
+                        return
+                    except RuntimeError:
+                        pass  # 3차도 실패 → Claude 폴백으로
+
+                # 4차: Claude CLI 폴백
+                if not Config.CLAUDE_FALLBACK_ENABLED or messages is None:
+                    raise fb1_exc from exc
+                logger.warning("Codex CLI 폴백 모두 실패, Claude CLI 최종 폴백 시도")
+                fallback_prompt = self._messages_to_prompt(messages, expect_json=expect_json)
+                claude_model = Config.CLAUDE_MODEL_FAST if expect_json else Config.CLAUDE_MODEL_REASONING
+                self._call_claude(
+                    prompt=fallback_prompt,
+                    task_dir=task_dir,
+                    output_file=output_file,
+                    model=claude_model,
+                )
+    
+    def _call_claude(
+        self,
+        prompt: str,
+        task_dir: Path,
+        output_file: Path,
+        model: Optional[str] = None,
+    ) -> None:
+        claude_bin = Config.CLAUDE_BIN
+        selected_model = model or Config.CLAUDE_MODEL_FAST
+        command: List[str] = [
+            claude_bin,
+            "-p",                        # print mode (비대화형)
+            "--model", selected_model,
+            "--output-format", "text",   # 순수 텍스트 출력
+        ]
+
+        (task_dir / "claude_prompt.txt").write_text(prompt, encoding="utf-8")
+        logger.info(
+            "Claude CLI 폴백 호출: %s, model=%s, prompt_len=%d",
+            ' '.join(command), selected_model, len(prompt),
+        )
+
+        process = subprocess.run(
+            command,
+            input=prompt,               # stdin으로 프롬프트 전달
+            text=True,
+            capture_output=True,
+            timeout=Config.CLAUDE_TIMEOUT_SEC,
+            check=False,
+        )
+
+        (task_dir / "claude_stderr.log").write_text(process.stderr or "", encoding="utf-8")
+
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Claude CLI 실행 실패(exit={process.returncode}): {(process.stderr or '').strip()}"
+            )
+
+        result_text = process.stdout.strip()
+        if not result_text:
+            raise RuntimeError("Claude CLI 실행은 성공했지만 출력이 비어있습니다.")
+
+        # JSON 출력 파일이면 응답에서 JSON 객체만 추출
+        if output_file.suffix == '.json':
+            result_text = self._extract_json_from_text(result_text)
+
+        output_file.write_text(result_text, encoding="utf-8")
+
+        (task_dir / "claude_fallback.json").write_text(
+            json.dumps({
+                "model": selected_model,
+                "bin": claude_bin,
+                "finished_at": datetime.now().isoformat(),
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     
     def _run_command(
         self,
@@ -275,8 +471,9 @@ class CodexBroker:
             parts.append(f"[{role}]\n{content}".strip())
         if expect_json:
             parts.append(
-                "[SYSTEM]\nReturn only a valid JSON object that satisfies the provided schema. "
-                "Do not wrap the JSON in markdown fences."
+                "[SYSTEM]\nIMPORTANT: Return ONLY a raw JSON object. "
+                "No markdown fences, no explanation, no preamble, no trailing text. "
+                "The very first character of your response must be '{' and the last must be '}'."
             )
         return '\n\n'.join(parts).strip()
     

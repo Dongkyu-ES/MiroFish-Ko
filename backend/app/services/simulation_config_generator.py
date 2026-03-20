@@ -15,6 +15,7 @@
 
 import json
 import math
+import os
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -80,8 +81,11 @@ class AgentActivityConfig:
     # 영향력 가중치
     influence_weight: float = 1.0
 
+    # 생성 방식
+    generation_source: str = "llm"
 
-@dataclass  
+
+@dataclass
 class TimeSimulationConfig:
     """시뮬레이션 시간/활동 설정"""
     # 전체 시뮬레이션 시간(기본 72시간)
@@ -123,8 +127,11 @@ class EventConfig:
     # 핵심 이슈
     hot_topics: List[str] = field(default_factory=list)
     
-    # 
+    #
     narrative_direction: str = ""
+
+    # 생성 방식
+    generation_source: str = "llm"
 
 
 @dataclass
@@ -238,14 +245,19 @@ class SimulationConfigGenerator:
             model=model_name,
         )
     
+    # OASIS 시뮬레이션용 기본 모델 (codex_cli 모델은 API 직접 접근 불가)
+    OASIS_DEFAULT_MODEL = "gpt-4.1-mini"
+
     def _get_runtime_llm_model(self) -> str:
+        """OASIS 시뮬레이션에서 사용할 모델명. codex_cli 모델은 API 접근 불가하므로 대체."""
         if getattr(self.llm_client, 'provider', Config.LLM_PROVIDER) == 'codex_cli':
-            return Config.CODEX_JSON_MODEL
+            return os.environ.get('OASIS_LLM_MODEL', self.OASIS_DEFAULT_MODEL)
         return self.model_name
-    
+
     def _get_runtime_llm_base(self) -> str:
+        """OASIS 시뮬레이션용 base URL. codex_cli는 직접 사용 불가."""
         if getattr(self.llm_client, 'provider', Config.LLM_PROVIDER) == 'codex_cli':
-            return 'codex_cli'
+            return os.environ.get('OASIS_LLM_BASE_URL', '')
         return self.base_url
     
     def generate_config(
@@ -313,25 +325,40 @@ class SimulationConfigGenerator:
         event_config = self._parse_event_config(event_config_result)
         reasoning_parts.append(f"설정: {event_config_result.get('reasoning', '')}")
         
-        # ========== 3-N: 생성Agent설정 ==========
-        all_agent_configs = []
-        for batch_idx in range(num_batches):
+        # ========== 3-N: 생성Agent설정 (병렬) ==========
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        all_agent_configs = [None] * len(entities)
+        max_workers = min(8, num_batches)
+
+        def _run_batch(batch_idx):
             start_idx = batch_idx * self.AGENTS_PER_BATCH
             end_idx = min(start_idx + self.AGENTS_PER_BATCH, len(entities))
             batch_entities = entities[start_idx:end_idx]
-            
-            report_progress(
-                3 + batch_idx,
-                f"생성Agent설정 ({start_idx + 1}-{end_idx}/{len(entities)})..."
-            )
-            
-            batch_configs = self._generate_agent_configs_batch(
+            configs = self._generate_agent_configs_batch(
                 context=context,
                 entities=batch_entities,
                 start_idx=start_idx,
                 simulation_requirement=simulation_requirement
             )
-            all_agent_configs.extend(batch_configs)
+            return batch_idx, start_idx, end_idx, configs
+
+        completed_batches = [0]
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_run_batch, i): i
+                for i in range(num_batches)
+            }
+            for future in as_completed(futures):
+                batch_idx, start_idx, end_idx, configs = future.result()
+                all_agent_configs[start_idx:start_idx + len(configs)] = configs
+                completed_batches[0] += 1
+                report_progress(
+                    3 + completed_batches[0] - 1,
+                    f"생성Agent설정 ({completed_batches[0]}/{num_batches} 배치, {end_idx}/{len(entities)})..."
+                )
+
+        all_agent_configs = [c for c in all_agent_configs if c is not None]
         
         reasoning_parts.append(f"Agent설정: 생성 {len(all_agent_configs)}개")
         
@@ -448,29 +475,18 @@ class SimulationConfigGenerator:
         
         for attempt in range(max_attempts):
             try:
-                content = self.llm_client.chat(
+                result = self.llm_client.chat_json(
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0.7 - (attempt * 0.1)  # 
-                    # max_tokens, LLM
+                    temperature=0.7 - (attempt * 0.1)
                 )
-                
-                # JSON
-                try:
-                    return json.loads(content)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"JSON실패 (attempt {attempt+1}): {str(e)[:80]}")
-                    
-                    # JSON
-                    fixed = self._try_fix_config_json(content)
-                    if fixed:
-                        return fixed
-                    
-                    last_error = e
-                    
+                return result
+
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"JSON실패 (attempt {attempt+1}): {str(e)[:80]}")
+                last_error = e
             except Exception as e:
                 logger.warning(f"LLM호출실패 (attempt {attempt+1}): {str(e)[:80]}")
                 last_error = e
@@ -704,7 +720,8 @@ class SimulationConfigGenerator:
                 "hot_topics": [],
                 "narrative_direction": "",
                 "initial_posts": [],
-                "reasoning": "기본 이벤트 설정"
+                "reasoning": "기본 이벤트 설정",
+                "generation_source": "rule_based"
             }
     
     def _parse_event_config(self, result: Dict[str, Any]) -> EventConfig:
@@ -713,7 +730,8 @@ class SimulationConfigGenerator:
             initial_posts=result.get("initial_posts", []),
             scheduled_events=[],
             hot_topics=result.get("hot_topics", []),
-            narrative_direction=result.get("narrative_direction", "")
+            narrative_direction=result.get("narrative_direction", ""),
+            generation_source=result.get("generation_source", "llm")
         )
     
     def _assign_initial_post_agents(
@@ -878,11 +896,12 @@ class SimulationConfigGenerator:
         for i, entity in enumerate(entities):
             agent_id = start_idx + i
             cfg = llm_configs.get(agent_id, {})
-            
+
             # LLM 결과가 없으면 규칙 기반 기본값 사용
-            if not cfg:
+            is_rule_based = not cfg
+            if is_rule_based:
                 cfg = self._generate_agent_config_by_rule(entity)
-            
+
             config = AgentActivityConfig(
                 agent_id=agent_id,
                 entity_uuid=entity.uuid,
@@ -896,7 +915,8 @@ class SimulationConfigGenerator:
                 response_delay_max=cfg.get("response_delay_max", 60),
                 sentiment_bias=cfg.get("sentiment_bias", 0.0),
                 stance=cfg.get("stance", "neutral"),
-                influence_weight=cfg.get("influence_weight", 1.0)
+                influence_weight=cfg.get("influence_weight", 1.0),
+                generation_source="rule_based" if is_rule_based else "llm"
             )
             configs.append(config)
         
@@ -984,4 +1004,135 @@ class SimulationConfigGenerator:
                 "stance": "neutral",
                 "influence_weight": 1.0
             }
+
+    def regenerate_rule_based_configs(
+        self,
+        params: "SimulationParameters",
+        entities: List[EntityNode],
+        document_text: str,
+        simulation_requirement: str,
+    ) -> tuple:
+        """
+        규칙 기반으로 생성된 설정을 LLM으로 재생성한다.
+
+        Args:
+            params: 기존 SimulationParameters
+            entities: 전체 엔터티 목록
+            document_text: 문서 텍스트
+            simulation_requirement: 시뮬레이션 요구사항
+
+        Returns:
+            (updated_params, stats) 튜플
+            stats: {"regenerated_agents": N, "still_rule_based": N, "events_regenerated": bool}
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # 규칙 기반 에이전트 필터링
+        rule_based_configs = [c for c in params.agent_configs if c.generation_source == "rule_based"]
+        llm_configs = [c for c in params.agent_configs if c.generation_source != "rule_based"]
+
+        stats = {
+            "regenerated_agents": 0,
+            "still_rule_based": 0,
+            "events_regenerated": False,
+        }
+
+        if not rule_based_configs and params.event_config.generation_source != "rule_based":
+            return params, stats
+
+        # 컨텍스트 빌드
+        context = self._build_context(
+            simulation_requirement=simulation_requirement,
+            document_text=document_text,
+            entities=entities,
+        )
+
+        # 에이전트 재생성
+        if rule_based_configs:
+            # UUID -> EntityNode 매핑
+            entity_map = {e.uuid: e for e in entities}
+
+            # agent_id 기준으로 배치 구성
+            rule_based_configs_sorted = sorted(rule_based_configs, key=lambda c: c.agent_id)
+
+            num_batches = math.ceil(len(rule_based_configs_sorted) / self.AGENTS_PER_BATCH)
+            max_workers = min(8, num_batches)
+
+            def _run_regen_batch(batch_configs):
+                batch_entities = []
+                id_mapping = []  # (agent_id, entity) pairs
+                for cfg in batch_configs:
+                    entity = entity_map.get(cfg.entity_uuid)
+                    if entity:
+                        batch_entities.append(entity)
+                        id_mapping.append((cfg.agent_id, entity))
+
+                if not batch_entities:
+                    return []
+
+                start_idx = batch_configs[0].agent_id
+                new_configs = self._generate_agent_configs_batch(
+                    context=context,
+                    entities=batch_entities,
+                    start_idx=start_idx,
+                    simulation_requirement=simulation_requirement,
+                )
+                # Restore original agent_ids (batch may not be contiguous)
+                for i, (orig_id, _) in enumerate(id_mapping):
+                    if i < len(new_configs):
+                        new_configs[i].agent_id = orig_id
+                return new_configs
+
+            batches = [
+                rule_based_configs_sorted[i * self.AGENTS_PER_BATCH:(i + 1) * self.AGENTS_PER_BATCH]
+                for i in range(num_batches)
+            ]
+
+            regenerated = []
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_run_regen_batch, batch): batch for batch in batches}
+                for future in as_completed(futures):
+                    regenerated.extend(future.result())
+
+            # Merge: replace rule_based entries with newly generated ones
+            regenerated_by_id = {c.agent_id: c for c in regenerated}
+            still_rule_based = sum(
+                1 for c in regenerated if c.generation_source == "rule_based"
+            )
+            stats["regenerated_agents"] = len(regenerated) - still_rule_based
+            stats["still_rule_based"] = still_rule_based
+
+            # Rebuild full agent_configs list preserving original order
+            agent_id_to_new = regenerated_by_id
+            merged_configs = []
+            for c in params.agent_configs:
+                if c.agent_id in agent_id_to_new:
+                    merged_configs.append(agent_id_to_new[c.agent_id])
+                else:
+                    merged_configs.append(c)
+        else:
+            merged_configs = list(params.agent_configs)
+
+        # 이벤트 설정 재생성
+        new_event_config = params.event_config
+        if params.event_config.generation_source == "rule_based":
+            event_result = self._generate_event_config(context, simulation_requirement, entities)
+            new_event_config = self._parse_event_config(event_result)
+            new_event_config = self._assign_initial_post_agents(new_event_config, merged_configs)
+            stats["events_regenerated"] = True
+
+        import dataclasses
+        updated_params = dataclasses.replace(
+            params,
+            agent_configs=merged_configs,
+            event_config=new_event_config,
+        )
+
+        logger.info(
+            f"재생성완료: regenerated={stats['regenerated_agents']}, "
+            f"still_rule_based={stats['still_rule_based']}, "
+            f"events_regenerated={stats['events_regenerated']}"
+        )
+
+        return updated_params, stats
     

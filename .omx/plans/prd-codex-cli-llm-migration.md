@@ -50,7 +50,7 @@
 ## Acceptance Criteria
 1. `LLM_PROVIDER=codex_cli`일 때 `Config.validate()`가 `LLM_API_KEY`를 필수로 요구하지 않는다.
 2. `LLMClient.chat()`/`chat_json()`은 호출부 변경 없이 Codex CLI 기반으로 실행 가능하다.
-3. Codex JSON lane은 `gpt-5.3-codex-spark`, reasoning lane은 `gpt-5.4`를 기본값으로 분리한다.
+3. Codex JSON lane은 `gpt-5.4-mini`, reasoning lane은 `gpt-5.4`를 기본값으로 분리한다.
 4. Codex 실행 요청/출력/오류는 파일로 남아 재현 가능해야 한다.
 5. OpenAI provider 경로는 기존 동작을 유지해야 한다.
 6. 새 테스트가 provider routing의 기본 회귀를 잡아야 한다.

@@ -452,11 +452,51 @@ class TwitterSimulationRunner:
             os.environ["OPENAI_API_BASE_URL"] = llm_base_url
         
         print(f"LLM설정: model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else ''}...")
-        
-        return ModelFactory.create(
-            model_platform=ModelPlatformType.OPENAI,
-            model_type=llm_model,
-        )
+
+        claude_primary = os.environ.get("CLAUDE_PRIMARY", "false").lower() == "true"
+        claude_model_fast = os.environ.get("CLAUDE_MODEL_FAST", "claude-haiku-4-5")
+
+        if claude_primary:
+            # CLAUDE_PRIMARY 모드: Anthropic 먼저, OpenAI 폴백
+            primary_claude_model = os.environ.get("OASIS_FALLBACK_MODEL", claude_model_fast)
+            try:
+                print(f"[LLM] CLAUDE_PRIMARY 모드: 1차 모델 시도 (Anthropic): {primary_claude_model}")
+                return ModelFactory.create(
+                    model_platform=ModelPlatformType.ANTHROPIC,
+                    model_type=primary_claude_model,
+                )
+            except Exception as primary_err:
+                print(f"[LLM] 1차 모델 실패 ({primary_claude_model}): {primary_err}")
+                print(f"[LLM] 2차 폴백 모델로 전환 (OpenAI): {llm_model}")
+                return ModelFactory.create(
+                    model_platform=ModelPlatformType.OPENAI,
+                    model_type=llm_model,
+                )
+        else:
+            # 기본 모드: OpenAI 먼저, Anthropic 폴백
+            # 1차 모델 시도 + 사전 검증
+            try:
+                import openai as _openai
+                _client = _openai.OpenAI()
+                _client.chat.completions.create(
+                    model=llm_model, messages=[{"role": "user", "content": "ping"}], max_tokens=1,
+                )
+                print(f"[LLM] 1차 모델 검증 성공: {llm_model}")
+                return ModelFactory.create(
+                    model_platform=ModelPlatformType.OPENAI,
+                    model_type=llm_model,
+                )
+            except Exception as primary_err:
+                fallback_model = os.environ.get("OASIS_FALLBACK_MODEL", "claude-haiku-4-5")
+                fallback_enabled = os.environ.get("OASIS_FALLBACK_ENABLED", "true").lower() == "true"
+                if not fallback_enabled:
+                    raise
+                print(f"[LLM] 1차 모델 실패 ({llm_model}): {primary_err}")
+                print(f"[LLM] 2차 폴백 모델로 전환: {fallback_model}")
+                return ModelFactory.create(
+                    model_platform=ModelPlatformType.ANTHROPIC,
+                    model_type=fallback_model,
+                )
     
     def _get_active_agents_for_round(
         self, 

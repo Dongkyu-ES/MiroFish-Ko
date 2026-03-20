@@ -8,6 +8,7 @@ import sys
 import json
 import time
 import asyncio
+import tempfile
 import threading
 import subprocess
 import signal
@@ -294,19 +295,29 @@ class SimulationRunner:
             logger.error(f"로드실행상태실패: {str(e)}")
             return None
     
+    _run_state_lock = threading.Lock()
+
     @classmethod
     def _save_run_state(cls, state: SimulationRunState):
-        """저장실행상태파일"""
-        sim_dir = os.path.join(cls.RUN_STATE_DIR, state.simulation_id)
-        os.makedirs(sim_dir, exist_ok=True)
-        state_file = os.path.join(sim_dir, "run_state.json")
-        
-        data = state.to_detail_dict()
-        
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        cls._run_states[state.simulation_id] = state
+        """저장실행상태파일 (atomic write)"""
+        with cls._run_state_lock:
+            sim_dir = os.path.join(cls.RUN_STATE_DIR, state.simulation_id)
+            os.makedirs(sim_dir, exist_ok=True)
+            state_file = os.path.join(sim_dir, "run_state.json")
+
+            data = state.to_detail_dict()
+
+            fd, tmp_path = tempfile.mkstemp(suffix='.tmp', dir=sim_dir)
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, state_file)
+            except BaseException:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
+
+            cls._run_states[state.simulation_id] = state
     
     @classmethod
     def start_simulation(

@@ -2,7 +2,9 @@ import axios from 'axios'
 
 // axios 인스턴스 생성
 const service = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001',
+  // 각 API 모듈이 이미 `/api/...` 경로를 사용하므로 기본 baseURL은 빈 문자열이어야 한다.
+  // 그래야 Vite dev proxy(/api -> :5001)와 외부 역프록시/터널 환경에서 경로가 중복되지 않는다.
+  baseURL: import.meta.env.VITE_API_BASE_URL || '',
   timeout: 300000, // 5분 타임아웃(온톨로지 생성은 시간이 오래 걸릴 수 있음)
   headers: {
     'Content-Type': 'application/json'

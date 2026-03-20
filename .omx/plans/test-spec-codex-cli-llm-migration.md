@@ -39,7 +39,7 @@
 ## Manual Smoke Plan
 1. `.env`에 아래 설정
    - `LLM_PROVIDER=codex_cli`
-   - `CODEX_JSON_MODEL=gpt-5.3-codex-spark`
+   - `CODEX_JSON_MODEL=gpt-5.4-mini`
    - `CODEX_REASONING_MODEL=gpt-5.4`
 2. Flask 부팅
 3. 간단한 Python shell 또는 단위 API에서 `LLMClient.chat_json()` 호출
