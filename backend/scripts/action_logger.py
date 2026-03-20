@@ -16,6 +16,7 @@ import json
 import os
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -160,46 +161,45 @@ def fetch_new_actions_from_db_simple(
         return actions, new_last_rowid
 
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT rowid, user_id, action, info
-            FROM trace
-            WHERE rowid > ?
-            ORDER BY rowid ASC
-            """,
-            (last_rowid,),
-        )
+        with closing(sqlite3.connect(db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT rowid, user_id, action, info
+                FROM trace
+                WHERE rowid > ?
+                ORDER BY rowid ASC
+                """,
+                (last_rowid,),
+            )
 
-        for rowid, user_id, action, info_json in cursor.fetchall():
-            new_last_rowid = rowid
-            if action in FILTERED_ACTIONS:
-                continue
+            for rowid, user_id, action, info_json in cursor.fetchall():
+                new_last_rowid = rowid
+                if action in FILTERED_ACTIONS:
+                    continue
 
-            try:
-                raw_args = json.loads(info_json) if info_json else {}
-            except json.JSONDecodeError:
-                raw_args = {}
+                try:
+                    raw_args = json.loads(info_json) if info_json else {}
+                except json.JSONDecodeError:
+                    raw_args = {}
 
-            action_args = {}
-            for key in (
-                'content', 'post_id', 'comment_id', 'quoted_id', 'new_post_id',
-                'follow_id', 'query', 'like_id', 'dislike_id', 'target_user_name',
-                'target_user', 'post_author_name', 'original_author_name',
-                'comment_author_name'
-            ):
-                if key in raw_args:
-                    action_args[key] = raw_args[key]
+                action_args = {}
+                for key in (
+                    'content', 'post_id', 'comment_id', 'quoted_id', 'new_post_id',
+                    'follow_id', 'query', 'like_id', 'dislike_id', 'target_user_name',
+                    'target_user', 'post_author_name', 'original_author_name',
+                    'comment_author_name'
+                ):
+                    if key in raw_args:
+                        action_args[key] = raw_args[key]
 
-            actions.append({
-                'agent_id': user_id,
-                'agent_name': agent_names.get(user_id, f'Agent_{user_id}'),
-                'action_type': ACTION_TYPE_MAP.get(action, action.upper()),
-                'action_args': action_args,
-            })
+                actions.append({
+                    'agent_id': user_id,
+                    'agent_name': agent_names.get(user_id, f'Agent_{user_id}'),
+                    'action_type': ACTION_TYPE_MAP.get(action, action.upper()),
+                    'action_args': action_args,
+                })
 
-        conn.close()
     except Exception as e:
         print(f"읽기실패: {e}")
 

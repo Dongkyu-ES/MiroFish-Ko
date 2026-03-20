@@ -20,6 +20,7 @@ import random
 import signal
 import sys
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
@@ -310,30 +311,28 @@ class IPCHandler:
             return result
         
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # 조회Interview
-            cursor.execute("""
-                SELECT user_id, info, created_at
-                FROM trace
-                WHERE action = ? AND user_id = ?
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, (ActionType.INTERVIEW.value, agent_id))
-            
-            row = cursor.fetchone()
-            if row:
-                user_id, info_json, created_at = row
-                try:
-                    info = json.loads(info_json) if info_json else {}
-                    result["response"] = info.get("response", info)
-                    result["timestamp"] = created_at
-                except json.JSONDecodeError:
-                    result["response"] = info_json
-            
-            conn.close()
-            
+            with closing(sqlite3.connect(db_path)) as conn:
+                cursor = conn.cursor()
+
+                # 조회Interview
+                cursor.execute("""
+                    SELECT user_id, info, created_at
+                    FROM trace
+                    WHERE action = ? AND user_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (ActionType.INTERVIEW.value, agent_id))
+
+                row = cursor.fetchone()
+                if row:
+                    user_id, info_json, created_at = row
+                    try:
+                        info = json.loads(info_json) if info_json else {}
+                        result["response"] = info.get("response", info)
+                        result["timestamp"] = created_at
+                    except json.JSONDecodeError:
+                        result["response"] = info_json
+
         except Exception as e:
             print(f"  읽기Interview실패: {e}")
         
