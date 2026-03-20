@@ -115,6 +115,8 @@ def generate_report():
         stub_report = Report(
             report_id=report_id,
             simulation_id=simulation_id,
+            graph_id=graph_id,
+            simulation_requirement=simulation_requirement,
             status=ReportStatus.GENERATING,
             created_at=datetime.now().isoformat(),
         )
