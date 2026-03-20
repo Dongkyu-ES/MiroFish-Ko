@@ -980,17 +980,25 @@ def _get_comment_info(
 def create_model(config: Dict[str, Any], use_boost: bool = False):
     """
     LLM
-    
+
      LLM 설정, 병렬시뮬레이션:
     - 설정:LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_NAME
     - 설정(선택):LLM_BOOST_API_KEY, LLM_BOOST_BASE_URL, LLM_BOOST_MODEL_NAME
-    
+
     설정 LLM, 병렬시뮬레이션플랫폼 API , .
-    
+
     Args:
         config: 시뮬레이션설정
         use_boost:  LLM 설정()
     """
+    # CLI 백엔드 모드: API 키 없이 CLI로 직접 호출
+    cli_backend = os.environ.get("LLM_BACKEND", "").lower()
+    llm_base_url = os.environ.get("LLM_BASE_URL", "")
+    if cli_backend == "cli" or llm_base_url == "codex_cli":
+        from app.models.cli_model_backend import CliModelBackend
+        print("[LLM] CLI 백엔드 모드: Codex/Claude CLI로 직접 호출")
+        return CliModelBackend(model_type="cli-model")
+
     # 설정
     boost_api_key = os.environ.get("LLM_BOOST_API_KEY", "")
     boost_base_url = os.environ.get("LLM_BOOST_BASE_URL", "")

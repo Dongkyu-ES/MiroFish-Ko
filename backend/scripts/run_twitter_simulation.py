@@ -426,12 +426,20 @@ class TwitterSimulationRunner:
     def _create_model(self):
         """
         LLM
-        
+
         프로젝트디렉터리 .env 파일 처리 중():
         - LLM_API_KEY: API
         - LLM_BASE_URL: APIURL
-        - LLM_MODEL_NAME: 
+        - LLM_MODEL_NAME:
         """
+        # CLI 백엔드 모드: API 키 없이 CLI로 직접 호출
+        cli_backend = os.environ.get("LLM_BACKEND", "").lower()
+        llm_base_url_check = os.environ.get("LLM_BASE_URL", "")
+        if cli_backend == "cli" or llm_base_url_check == "codex_cli":
+            from app.models.cli_model_backend import CliModelBackend
+            print("[LLM] CLI 백엔드 모드: Codex/Claude CLI로 직접 호출")
+            return CliModelBackend(model_type="cli-model")
+
         #  .env 읽기설정
         llm_api_key = os.environ.get("LLM_API_KEY", "")
         llm_base_url = os.environ.get("LLM_BASE_URL", "")
