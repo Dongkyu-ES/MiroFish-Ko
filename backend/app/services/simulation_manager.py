@@ -130,6 +130,21 @@ class SimulationManager:
         '../../uploads/simulations'
     )
 
+    MAX_SIMULATION_HISTORY = 50
+
+    def _evict_oldest_simulation(self):
+        """캐시가 MAX_SIMULATION_HISTORY를 초과하면 가장 오래된 완료 시뮬레이션을 제거한다."""
+        if len(self._simulations) <= self.MAX_SIMULATION_HISTORY:
+            return
+        terminal = {SimulationStatus.COMPLETED, SimulationStatus.FAILED, SimulationStatus.STOPPED}
+        candidates = [
+            (sid, s) for sid, s in self._simulations.items()
+            if s.status in terminal
+        ]
+        if candidates:
+            oldest_id = min(candidates, key=lambda x: x[1].created_at)[0]
+            self._simulations.pop(oldest_id, None)
+
     _instance = None
     _lock = threading.RLock()
 
@@ -175,7 +190,8 @@ class SimulationManager:
                 raise
 
             self._simulations[state.simulation_id] = state
-    
+            self._evict_oldest_simulation()
+
     def _load_simulation_state(self, simulation_id: str) -> Optional[SimulationState]:
         """파일에서 시뮬레이션 상태를 불러온다."""
         if simulation_id in self._simulations:
@@ -211,8 +227,9 @@ class SimulationManager:
         )
         
         self._simulations[simulation_id] = state
+        self._evict_oldest_simulation()
         return state
-    
+
     def create_simulation(
         self,
         project_id: str,
@@ -539,6 +556,10 @@ class SimulationManager:
         simulations = []
         
         if os.path.exists(self.SIMULATION_DATA_DIR):
+            entries = [d for d in os.listdir(self.SIMULATION_DATA_DIR)
+                       if not d.startswith('.') and os.path.isdir(os.path.join(self.SIMULATION_DATA_DIR, d))]
+            if len(entries) > self.MAX_SIMULATION_HISTORY * 2:
+                logger.warning(f"시뮬레이션 디렉터리에 {len(entries)}개 항목, 정리를 권장합니다")
             for sim_id in os.listdir(self.SIMULATION_DATA_DIR):
                 # 숨김 파일(.DS_Store 등)과 비디렉터리는 건너뜀
                 sim_path = os.path.join(self.SIMULATION_DATA_DIR, sim_id)

@@ -13,6 +13,7 @@ import threading
 import subprocess
 import signal
 import atexit
+from contextlib import closing
 from typing import Dict, Any, List, Optional, Union
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -223,10 +224,30 @@ class SimulationRunner:
     _monitor_threads: Dict[str, threading.Thread] = {}
     _stdout_files: Dict[str, Any] = {}  #  stdout 파일
     _stderr_files: Dict[str, Any] = {}  #  stderr 파일
+
+    # 완료 상태 eviction 설정
+    MAX_COMPLETED_RUN_STATES = 50
+    _COMPLETED_GRACE_SEC = 300
     
     # 그래프설정
     _graph_memory_enabled: Dict[str, bool] = {}  # simulation_id -> enabled
     
+    @classmethod
+    def _evict_stale_run_states(cls):
+        now = datetime.now()
+        completed = []
+        for sid, st in list(cls._run_states.items()):
+            if st.runner_status in (RunnerStatus.COMPLETED, RunnerStatus.FAILED, RunnerStatus.STOPPED):
+                try:
+                    age = (now - datetime.fromisoformat(st.completed_at or st.updated_at)).total_seconds()
+                except (ValueError, TypeError):
+                    age = 0
+                completed.append((sid, age))
+        completed.sort(key=lambda x: x[1], reverse=True)
+        for sid, age in completed:
+            if age > cls._COMPLETED_GRACE_SEC or len(cls._run_states) > cls.MAX_COMPLETED_RUN_STATES:
+                cls._run_states.pop(sid, None)
+
     @classmethod
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
         """실행상태"""
@@ -342,6 +363,7 @@ class SimulationRunner:
             SimulationRunState
         """
         # 실행
+        cls._evict_stale_run_states()
         existing = cls.get_run_state(simulation_id)
         if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
             raise ValueError(f"시뮬레이션이 이미 실행 중입니다: {simulation_id}")
@@ -568,10 +590,12 @@ class SimulationRunner:
                     logger.error(f"중지그래프실패: {e}")
                 cls._graph_memory_enabled.pop(simulation_id, None)
             
-            # 
+            #
             cls._processes.pop(simulation_id, None)
             cls._action_queues.pop(simulation_id, None)
-            
+            cls._monitor_threads.pop(simulation_id, None)
+            cls._evict_stale_run_states()
+
             # 로그파일
             if simulation_id in cls._stdout_files:
                 try:
@@ -823,7 +847,11 @@ class SimulationRunner:
             except Exception as e:
                 logger.error(f"중지그래프실패: {e}")
             cls._graph_memory_enabled.pop(simulation_id, None)
-        
+
+        cls._processes.pop(simulation_id, None)
+        cls._action_queues.pop(simulation_id, None)
+        cls._monitor_threads.pop(simulation_id, None)
+
         logger.info(f"시뮬레이션중지: {simulation_id}")
         return state
     
@@ -1186,8 +1214,8 @@ class SimulationRunner:
             "errors": errors if errors else None
         }
     
-    # 
-    _cleanup_done = False
+    #
+    _cleanup_done: set = set()
     
     @classmethod
     def cleanup_all_simulations(cls):
@@ -1196,17 +1224,18 @@ class SimulationRunner:
         
         호출, 
         """
-        # 
-        if cls._cleanup_done:
+        #
+        if "__all__" in cls._cleanup_done:
             return
-        cls._cleanup_done = True
-        
+
         # (로그)
         has_processes = bool(cls._processes)
         has_updaters = bool(cls._graph_memory_enabled)
-        
+
         if not has_processes and not has_updaters:
             return  # , 반환
+
+        cls._cleanup_done.add("__all__")
         
         logger.info("진행 중시뮬레이션...")
         
@@ -1287,7 +1316,9 @@ class SimulationRunner:
         # 진행 중
         cls._processes.clear()
         cls._action_queues.clear()
-        
+        cls._monitor_threads.clear()
+        cls._run_states.clear()
+
         logger.info("시뮬레이션 완료")
     
     @classmethod
@@ -1676,42 +1707,40 @@ class SimulationRunner:
         results = []
         
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            if agent_id is not None:
-                cursor.execute("""
-                    SELECT user_id, info, created_at
-                    FROM trace
-                    WHERE action = 'interview' AND user_id = ?
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                """, (agent_id, limit))
-            else:
-                cursor.execute("""
-                    SELECT user_id, info, created_at
-                    FROM trace
-                    WHERE action = 'interview'
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                """, (limit,))
-            
-            for user_id, info_json, created_at in cursor.fetchall():
-                try:
-                    info = json.loads(info_json) if info_json else {}
-                except json.JSONDecodeError:
-                    info = {"raw": info_json}
-                
-                results.append({
-                    "agent_id": user_id,
-                    "response": info.get("response", info),
-                    "prompt": info.get("prompt", ""),
-                    "timestamp": created_at,
-                    "platform": platform_name
-                })
-            
-            conn.close()
-            
+            with closing(sqlite3.connect(db_path)) as conn:
+                cursor = conn.cursor()
+
+                if agent_id is not None:
+                    cursor.execute("""
+                        SELECT user_id, info, created_at
+                        FROM trace
+                        WHERE action = 'interview' AND user_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (agent_id, limit))
+                else:
+                    cursor.execute("""
+                        SELECT user_id, info, created_at
+                        FROM trace
+                        WHERE action = 'interview'
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (limit,))
+
+                for user_id, info_json, created_at in cursor.fetchall():
+                    try:
+                        info = json.loads(info_json) if info_json else {}
+                    except json.JSONDecodeError:
+                        info = {"raw": info_json}
+
+                    results.append({
+                        "agent_id": user_id,
+                        "response": info.get("response", info),
+                        "prompt": info.get("prompt", ""),
+                        "timestamp": created_at,
+                        "platform": platform_name
+                    })
+
         except Exception as e:
             logger.error(f"읽기Interview과거실패 ({platform_name}): {e}")
         
