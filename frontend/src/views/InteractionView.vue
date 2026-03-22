@@ -146,8 +146,20 @@ const loadReportData = async () => {
     const reportRes = await getReport(currentReportId.value)
     if (reportRes.success && reportRes.data) {
       const reportData = reportRes.data
+
+      // 리포트가 완료되지 않았으면 리다이렉트
+      if (reportData.status && reportData.status !== 'completed') {
+        console.warn(`[View] InteractionView: report ${currentReportId.value} status is ${reportData.status}, redirecting`)
+        if (reportData.status === 'failed') {
+          router.push({ name: 'Home' })
+        } else {
+          router.push({ name: 'Report', params: { reportId: currentReportId.value } })
+        }
+        return
+      }
+
       simulationId.value = reportData.simulation_id
-      
+
       if (simulationId.value) {
         // simulation 정보 조회
         const simRes = await getSimulation(simulationId.value)
@@ -170,10 +182,14 @@ const loadReportData = async () => {
         }
       }
     } else {
+      console.warn(`[View] InteractionView: failed to load report ${currentReportId.value}`)
       addLog(`보고서 정보 조회 실패: ${reportRes.error || '알 수 없는 오류'}`)
+      router.push({ name: 'Home' })
     }
   } catch (err) {
+    console.warn(`[View] InteractionView: exception loading report: ${err.message}`)
     addLog(`로드 중 예외 발생: ${err.message}`)
+    router.push({ name: 'Home' })
   }
 }
 

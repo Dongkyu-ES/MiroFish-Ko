@@ -146,7 +146,7 @@ const loadReportData = async () => {
     if (reportRes.success && reportRes.data) {
       const reportData = reportRes.data
       simulationId.value = reportData.simulation_id
-      
+
       if (simulationId.value) {
         // simulation 정보 조회
         const simRes = await getSimulation(simulationId.value)
@@ -169,10 +169,14 @@ const loadReportData = async () => {
         }
       }
     } else {
+      console.warn(`[View] ReportView: failed to load report ${currentReportId.value}`)
       addLog(`보고서 정보 조회 실패: ${reportRes.error || '알 수 없는 오류'}`)
+      router.push({ name: 'Home' })
     }
   } catch (err) {
+    console.warn(`[View] ReportView: exception loading report: ${err.message}`)
     addLog(`로드 중 예외 발생: ${err.message}`)
+    router.push({ name: 'Home' })
   }
 }
 

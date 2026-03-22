@@ -82,6 +82,7 @@ import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { listSimulations } from '../api/simulation'
+import { getReportBySimulation } from '../api/report'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 
 const route = useRoute()
@@ -252,6 +253,17 @@ const loadProject = async () => {
           if (simRes.success && simRes.data && simRes.data.length > 0) {
             const sim = simRes.data[0]
             if (['completed', 'stopped'].includes(sim.status)) {
+              // 리포트가 이미 존재하면 리포트 화면으로, 없으면 리포트 생성 화면으로
+              try {
+                const reportRes = await getReportBySimulation(sim.simulation_id)
+                if (reportRes?.data?.report_id) {
+                  addLog(`리포트 발견 (${reportRes.data.report_id}), 리포트 화면으로 이동`)
+                  router.push({ name: 'Report', params: { reportId: reportRes.data.report_id } })
+                  return
+                }
+              } catch (e) {
+                // 리포트 없음 (404) — fall through
+              }
               addLog(`시뮬레이션 완료 감지 (${sim.simulation_id}), 리포트 생성 화면으로 이동`)
               router.push({ name: 'SimulationRun', params: { simulationId: sim.simulation_id } })
               return

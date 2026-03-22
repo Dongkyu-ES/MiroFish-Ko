@@ -42,7 +42,7 @@ class Config:
     CODEX_REASONING_EFFORT = os.environ.get('CODEX_REASONING_EFFORT', 'high')
     CODEX_SERVICE_TIER = os.environ.get('CODEX_SERVICE_TIER', 'fast')
     CODEX_SANDBOX = os.environ.get('CODEX_SANDBOX', 'read-only')
-    CODEX_TIMEOUT_JSON_SEC = int(os.environ.get('CODEX_TIMEOUT_JSON_SEC', '120'))
+    CODEX_TIMEOUT_JSON_SEC = int(os.environ.get('CODEX_TIMEOUT_JSON_SEC', '600'))
     CODEX_TIMEOUT_REASONING_SEC = int(os.environ.get('CODEX_TIMEOUT_REASONING_SEC', '600'))
     CODEX_TASKS_DIR = os.environ.get(
         'CODEX_TASKS_DIR',
@@ -55,7 +55,7 @@ class Config:
     CLAUDE_BIN = os.environ.get('CLAUDE_BIN', 'claude')
     CLAUDE_MODEL_REASONING = os.environ.get('CLAUDE_MODEL_REASONING', 'claude-opus-4-6')
     CLAUDE_MODEL_FAST = os.environ.get('CLAUDE_MODEL_FAST', 'claude-haiku-4-5')
-    CLAUDE_TIMEOUT_SEC = int(os.environ.get('CLAUDE_TIMEOUT_SEC', '120'))
+    CLAUDE_TIMEOUT_SEC = int(os.environ.get('CLAUDE_TIMEOUT_SEC', '600'))
 
     # OASIS 시뮬레이션 모델 폴백 설정 (camel-ai 직접 호출)
     OASIS_FALLBACK_ENABLED = os.environ.get('OASIS_FALLBACK_ENABLED', 'true').lower() == 'true'

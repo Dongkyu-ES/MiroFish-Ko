@@ -238,12 +238,12 @@ const forceStopSimulation = async () => {
 const loadSimulationData = async () => {
   try {
     addLog(`시뮬레이션 데이터 불러오는 중: ${currentSimulationId.value}`)
-    
+
     // simulation 정보 조회
     const simRes = await getSimulation(currentSimulationId.value)
     if (simRes.success && simRes.data) {
       const simData = simRes.data
-      
+
       // project 정보 조회
       if (simData.project_id) {
         const projRes = await getProject(simData.project_id)
@@ -258,10 +258,14 @@ const loadSimulationData = async () => {
         }
       }
     } else {
+      console.warn(`[View] SimulationView: failed to load sim ${currentSimulationId.value}`)
       addLog(`시뮬레이션 데이터 로드 실패: ${simRes.error || '알 수 없는 오류'}`)
+      router.push({ name: 'Home' })
     }
   } catch (err) {
+    console.warn(`[View] SimulationView: exception loading sim: ${err.message}`)
     addLog(`로드 중 예외 발생: ${err.message}`)
+    router.push({ name: 'Home' })
   }
 }
 

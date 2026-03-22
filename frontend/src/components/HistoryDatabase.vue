@@ -169,9 +169,10 @@
                 <span class="btn-icon">◇</span>
                 <span class="btn-text">그래프 구축</span>
               </button>
-              <button 
-                class="modal-btn btn-simulation" 
+              <button
+                class="modal-btn btn-simulation"
                 @click="goToSimulation"
+                :disabled="!selectedProject.simulation_id"
               >
                 <span class="btn-step">Step2</span>
                 <span class="btn-icon">◈</span>
@@ -412,23 +413,16 @@ const closeModal = () => {
 
 const goToProject = () => {
   if (selectedProject.value?.project_id) {
-    router.push({
-      name: 'Process',
-      params: { projectId: selectedProject.value.project_id }
-    })
+    router.push({ name: 'Process', params: { projectId: selectedProject.value.project_id } })
     closeModal()
   }
 }
 
 
 const goToSimulation = () => {
-  if (selectedProject.value?.simulation_id) {
-    router.push({
-      name: 'Simulation',
-      params: { simulationId: selectedProject.value.simulation_id }
-    })
-    closeModal()
-  }
+  if (!selectedProject.value?.simulation_id) return
+  router.push({ name: 'Simulation', params: { simulationId: selectedProject.value.simulation_id } })
+  closeModal()
 }
 
 

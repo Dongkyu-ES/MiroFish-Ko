@@ -202,12 +202,19 @@ const handleNextStep = () => {
 const loadSimulationData = async () => {
   try {
     addLog(`시뮬레이션 데이터 불러오는 중: ${currentSimulationId.value}`)
-    
+
     // simulation 정보 조회
     const simRes = await getSimulation(currentSimulationId.value)
     if (simRes.success && simRes.data) {
       const simData = simRes.data
-      
+
+      // 준비 안 된 시뮬레이션 → Step 2로 리다이렉트
+      if (['created', 'preparing'].includes(simData.status)) {
+        console.warn(`[View] SimulationRunView: sim ${currentSimulationId.value} is ${simData.status}, redirect to Step 2`)
+        router.push({ name: 'Simulation', params: { simulationId: currentSimulationId.value } })
+        return
+      }
+
       // simulation config에서 minutes_per_round 조회
       try {
         const configRes = await getSimulationConfig(currentSimulationId.value)

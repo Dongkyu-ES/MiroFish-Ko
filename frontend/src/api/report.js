@@ -43,6 +43,14 @@ export const getReport = (reportId) => {
 }
 
 /**
+ * 시뮬레이션 ID로 보고서 조회
+ * @param {string} simulationId
+ */
+export const getReportBySimulation = (simulationId) => {
+  return service.get(`/api/report/by-simulation/${simulationId}`)
+}
+
+/**
  * Report Agent와 대화
  * @param {Object} data - { simulation_id, message, chat_history? }
  */

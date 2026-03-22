@@ -401,6 +401,7 @@ class CodexBroker:
             "-p",                        # print mode (비대화형)
             "--model", selected_model,
             "--output-format", "text",   # 순수 텍스트 출력
+            "--strict-mcp-config",       # --mcp-config 외 MCP 서버 무시 (로드 0개)
         ]
 
         (task_dir / "claude_prompt.txt").write_text(prompt, encoding="utf-8")

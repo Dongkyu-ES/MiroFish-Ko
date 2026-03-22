@@ -288,11 +288,12 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { 
-  startSimulation, 
+import {
+  startSimulation,
   stopSimulation,
-  getRunStatus, 
-  getRunStatusDetail
+  getRunStatus,
+  getRunStatusDetail,
+  getSimulation
 } from '../api/simulation'
 import { generateReport } from '../api/report'
 
@@ -704,15 +705,41 @@ onMounted(async () => {
         runStatus.value = statusRes.data
         phase.value = 1
         emit('update-status', 'processing')
-        startPolling()
+        startStatusPolling()
+        startDetailPolling()
         return
       }
     }
   } catch (err) {
-    addLog(`실행 상태 확인 실패: ${err.message}, 새 시뮬레이션 시작`)
+    // getRunStatus 실패 시 — 시뮬레이션 메인 상태를 2차 확인하여 완료된 시뮬을 보호
+    addLog(`실행 상태 확인 실패: ${err.message}`)
+    try {
+      const simRes = await getSimulation(props.simulationId)
+      const simStatus = simRes?.data?.status || simRes?.status
+      if (['completed', 'stopped'].includes(simStatus)) {
+        addLog(`시뮬레이션 메인 상태: ${simStatus} — 완료된 시뮬레이션이므로 재시작하지 않음`)
+        phase.value = 2
+        emit('update-status', 'completed')
+        return
+      } else if (simStatus === 'running') {
+        addLog(`시뮬레이션 메인 상태: running — 모니터링 재시도`)
+        phase.value = 1
+        emit('update-status', 'processing')
+        startStatusPolling()
+        startDetailPolling()
+        return
+      }
+      // created/preparing/ready 등 → 새로 시작해도 안전
+      addLog(`시뮬레이션 메인 상태: ${simStatus} — 새 시뮬레이션 시작`)
+    } catch (simErr) {
+      addLog(`시뮬레이션 상태 확인도 실패: ${simErr.message} — 안전을 위해 시작하지 않음`)
+      startError.value = '시뮬레이션 상태를 확인할 수 없습니다. 페이지를 새로고침해 주세요.'
+      emit('update-status', 'error')
+      return
+    }
   }
 
-  // 상태 없거나 idle이면 새로 시작
+  // 상태 없거나 idle/ready이면 새로 시작
   doStartSimulation()
 })
 
